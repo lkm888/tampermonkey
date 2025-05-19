@@ -1,0 +1,1057 @@
+// ==UserScript==
+// @name         GDS 助手 (账户信息增强 + 交易列表集成)
+// @namespace    http://tampermonkey.net/
+// @version      4.0.0
+// @description  GDS 助手：1. 账户信息增强(列排序/显隐,固定表头,主题,刷新状态,0值修正,自动划转优化,操作日志等)。2. 交易列表集成(Bank列匹配GDS账户,受益人选择,打款节流,格式优化,操作日志)。通过面板切换显示不同模块。
+// @match        https://admin.gdspay.xyz/4444*
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @grant        GM_xmlhttpRequest
+// @connect      admin.gdspay.xyz
+// @connect      127.0.0.1
+// ==/UserScript==
+
+(function() {
+  'use strict';
+
+  // ---- 共享常量与配置 ----
+  const KEY_THEME_PREFERENCE = 'gds_assistant_theme_v4.0.0';
+  const CURRENT_VERSION = '4.0.0';
+
+  // ---- 共享 全局变量 ----
+  let currentTheme = 'light';
+  let activePanel = 'accountInfo'; // 'accountInfo' or 'transactionList'
+
+  // ---- 共享 样式注入 ----
+  const style = document.createElement('style');
+  style.innerHTML = `
+    /* Global Styles */
+    :root {
+      --body-bg: #fff; --text-color: #212529; --text-muted-color: #6c757d; --link-color: #007bff;
+      --border-color: #ccc; --border-color-light: #ddd; --border-color-lighter: #eee; --hover-bg-light: #e6f7ff;
+      --panel-bg: #f0f0f0; --panel-border: #ccc; --panel-shadow: rgba(0,0,0,0.1);
+      --input-bg: #fff; --input-border: #bbb; --input-text: #495057;
+      --button-bg: #f8f8f8; --button-hover-bg: #e0e0e0; --button-border: #bbb;
+      --button-active-bg: #cce5ff; --button-active-border: #007bff; --button-active-text: #004085;
+      --button-disabled-opacity: 0.6; --button-disabled-bg: #eee;
+      --table-bg: #fff; --table-border: #ddd; --table-header-bg: #e9e9e9;
+      --table-row-even-bg: #f9f9f9; --table-row-hover-bg: #e6f7ff; --table-sticky-header-bg: #e9e9e9;
+      --log-bg: #fdfdfd; --log-border: #ccc; --log-shadow: rgba(0,0,0,0.15);
+      --log-entry-border: #eee; --log-time-color: #666; --log-account-id-color: #337ab7; --log-account-name-color: #555;
+      --toast-bg: rgba(0,0,0,0.75); --toast-text: white;
+      --fetch-status-bg: #e0e0e0; --fetch-status-text: #333;
+      --fetch-status-success-bg: #d4edda; --fetch-status-success-text: #155724; --fetch-status-success-border: #c3e6cb;
+      --fetch-status-error-bg: #f8d7da; --fetch-status-error-text: #721c24; --fetch-status-error-border: #f5c6cb;
+      --fetch-status-info-bg: #e0e0e0; --fetch-status-info-text: #333; --fetch-status-shadow: rgba(0,0,0,0.2);
+      --column-toggle-panel-bg: #f7f7f7; --column-toggle-panel-border: #ddd; --column-toggle-panel-shadow: rgba(0,0,0,0.05);
+      /* Account Info Specific */
+      --status-enabled-color: green; --status-api-stopped-color: red; --status-api-custom-stop-color: purple;
+      --status-unknown-color: orange; --status-disappeared-color: #999;
+      --balance-tier-1-color: #1976D2; --balance-tier-2-color: #00796B; --balance-tier-3-color: #388E3C; --balance-tier-4-color: #F57C00;
+      --bal-high-color: red; --bal-negative-color: #28a745; --frozen-positive-color: #dc3545;
+      --hourly-rate-positive-color: #28a745; --hourly-rate-monday-color: purple; --hourly-rate-stagnant-color: #6c757d;
+      --hourly-rate-bg: #fff; --hourly-rate-border: #ddd;
+      /* Transaction List Specific */
+      --action-button-color: #007bff; --action-button-hover-color: #0056b3;
+    }
+    body.dark-theme {
+      --body-bg: #22272e; --text-color: #c9d1d9; --text-muted-color: #8b949e; --link-color: #58a6ff;
+      --border-color: #444c56; --border-color-light: #373e47; --border-color-lighter: #2d333b; --hover-bg-light: #30363d;
+      --panel-bg: #2d333b; --panel-border: #444c56; --panel-shadow: rgba(0,0,0,0.3);
+      --input-bg: #22272e; --input-border: #545d68; --input-text: #c9d1d9;
+      --button-bg: #373e47; --button-hover-bg: #444c56; --button-border: #545d68;
+      --button-active-bg: #388bfd; --button-active-border: #58a6ff; --button-active-text: #ffffff;
+      --button-disabled-opacity: 0.5; --button-disabled-bg: #2d333b;
+      --table-bg: #1c2128; --table-border: #444c56; --table-header-bg: #373e47;
+      --table-row-even-bg: #22272e; --table-row-hover-bg: #30363d; --table-sticky-header-bg: #373e47;
+      --log-bg: #1c2128; --log-border: #444c56; --log-shadow: rgba(0,0,0,0.3);
+      --log-entry-border: #373e47; --log-time-color: #8b949e; --log-account-id-color: #58a6ff; --log-account-name-color: #adbac7;
+      --toast-bg: rgba(200,200,200,0.85); --toast-text: #1c2128;
+      --fetch-status-bg: #373e47; --fetch-status-text: #c9d1d9;
+      --fetch-status-success-bg: #2ea043; --fetch-status-success-text: #ffffff; --fetch-status-success-border: #2ea043;
+      --fetch-status-error-bg: #da3633; --fetch-status-error-text: #ffffff; --fetch-status-error-border: #da33;
+      --fetch-status-info-bg: #373e47; --fetch-status-info-text: #c9d1d9; --fetch-status-shadow: rgba(0,0,0,0.4);
+      --column-toggle-panel-bg: #2a2f36; --column-toggle-panel-border: #373e47; --column-toggle-panel-shadow: rgba(0,0,0,0.15);
+      /* Account Info Specific */
+      --status-disappeared-color: #8b949e;
+      --hourly-rate-positive-color: #56d364; --hourly-rate-monday-color: #c691ff; --hourly-rate-stagnant-color: #8b949e;
+      --hourly-rate-bg: #22272e; --hourly-rate-border: #444c56;
+      /* Transaction List Specific */
+      --action-button-color: #58a6ff; --action-button-hover-color: #79c0ff;
+    }
+    body { background-color: var(--body-bg); color: var(--text-color); transition: background-color 0.3s, color 0.3s; }
+    input, select, button { color: var(--input-text); background-color: var(--input-bg); border: 1px solid var(--input-border); padding: 4px 6px; border-radius: 3px; }
+    select option { background-color: var(--input-bg); color: var(--input-text); }
+    body.dark-theme select option { background-color: var(--input-bg) !important; color: var(--input-text) !important; }
+
+    /* Main Control Panel */
+    #gds-assistant-control-panel {
+      position: fixed; top: 10px; left:50%; transform:translateX(-50%); background: var(--panel-bg);
+      padding: 6px 10px; border:1px solid var(--panel-border); display: flex; flex-wrap: wrap;
+      gap: 8px; align-items: center; z-index:10001; font-family: monospace; font-size: 12px;
+      box-shadow: 0 2px 5px var(--panel-shadow);
+    }
+    #gds-assistant-control-panel input, #gds-assistant-control-panel button { padding: 2px 4px; font-size:12px; }
+    #gds-assistant-control-panel button:hover { background-color: var(--button-hover-bg); }
+    #gds-assistant-panel-toggle-buttons button.active { background-color: var(--button-active-bg); border-color: var(--button-active-border); color: var(--button-active-text); font-weight: bold; }
+
+    /* Main Content Area for Panels */
+    #gds-assistant-main-content {
+      position: fixed; top: 55px; /* Kontrol paneli yüksekliği + boşluk */
+      left: 50%; transform: translateX(-50%); z-index: 9999;
+      font-family: monospace; font-size: 12px; width: calc(100% - 20px); max-width: 1800px;
+      display: flex; flex-direction: column;
+    }
+
+    /* Shared Column Toggle Panel Style */
+    .gds-column-toggle-panel {
+      background: var(--column-toggle-panel-bg); border: 1px solid var(--column-toggle-panel-border);
+      border-bottom: none; padding: 6px 10px; margin-bottom: 0;
+      display: flex; flex-wrap: wrap; gap: 10px; font-size: 11px;
+      box-shadow: 0 1px 3px var(--column-toggle-panel-shadow);
+    }
+    .gds-column-toggle-panel label { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
+    .gds-column-toggle-panel input[type="checkbox"] { margin:0; vertical-align: middle; }
+
+    /* Shared Table Style */
+    .gds-table-container {
+      background: var(--table-bg); border:1px solid var(--table-border); padding:0;
+      max-height: calc(100vh - 120px - 240px - 30px); /* Adjust as needed for combined layout */
+      min-height: 200px; overflow-y: auto; overflow-x: auto;
+      min-width: 800px; box-sizing: border-box; box-shadow: 0 2px 8px var(--panel-shadow);
+    }
+    #gds-tx-table-container { /* Specific max-height for tx table */
+        max-height: calc(100vh - (10px + 20px + 55px) - 40px - 30px - 120px - 20px); /* Main panel top + control panel top + tx control panel + col toggle + log + padding */
+    }
+
+    .gds-table-container table { border-collapse: collapse; width:100%; table-layout: auto; }
+    .gds-table-container th, .gds-table-container td {
+      border: 1px solid var(--table-border); padding: 5px 7px;
+      text-align: left; vertical-align: middle; white-space: nowrap;
+    }
+    .gds-table-container th {
+      position: sticky; top: 0; background: var(--table-header-bg); font-weight: bold; z-index: 10;
+      color: var(--text-color); cursor: default; user-select: none;
+    }
+    .gds-table-container th.sortable { cursor: pointer; }
+    .gds-table-container th.sortable:hover { background-color: var(--button-hover-bg); }
+    body.dark-theme .gds-table-container th { background: var(--table-sticky-header-bg); }
+    .gds-table-container tr:nth-child(even) td { background: var(--table-row-even-bg); }
+    .gds-table-container tr:hover td { background: var(--table-row-hover-bg); }
+    .gds-col-hidden { display: none !important; }
+
+    /* Shared Log Style */
+    .gds-log-base {
+      background: var(--log-bg);
+      border:1px solid var(--log-border); padding:10px; overflow: auto; z-index:10000;
+      font-size:12px; font-family:monospace; width: 100%;
+      box-sizing: border-box; box-shadow: 0 2px 8px var(--log-shadow); color: var(--text-color);
+    }
+    .gds-log-base .log-title { font-weight: bold; margin-bottom: 5px; display: block; }
+    .gds-log-base .log-entry { margin-bottom:5px; padding-bottom: 3px; border-bottom: 1px dotted var(--log-entry-border); line-height: 1.4; }
+    .gds-log-base .log-entry:last-child { border-bottom: none; }
+    .log-time { color: var(--log-time-color); margin-right: 5px;}
+    .log-account-id { font-weight: bold; color: var(--log-account-id-color); }
+    .log-account-name { color: var(--log-account-name-color); }
+    .log-amount-increase { color: red; } .log-amount-decrease { color: green; }
+    .log-interval { font-style: italic; color: var(--text-muted-color); margin-left: 5px; }
+    .log-status-change { color: blue; font-weight: bold; } .log-api-op-success { color: green; }
+    .log-api-op-fail { color: red; } .log-transfer-attempt { color: #DAA520; }
+    .log-transfer-success { color: #008000; font-weight: bold; } .log-transfer-fail { color: #B22222; font-weight: bold; }
+    .log-transfer-throttled { color: #708090; } .log-setting-change { color: #4682B4; }
+
+    /* Account Info Specific Styles */
+    #gds-account-info-panel { display: flex; flex-direction: column; }
+    #gds-account-last-refresh-time { color: var(--text-muted-color); margin-left:10px; font-style:italic; }
+    #gds-account-last-refresh-time.error { color: var(--bal-high-color); font-weight: bold; }
+    #gds-account-log-container { max-height: 220px; margin-top: 10px; order: 2; } /* Below table */
+    #gds-frozen-log-container { max-height: 100px; margin-top: 10px; order: 3; }
+    #gds-account-info-table-container { order: 1; } /* Table first */
+
+    .col-id { text-align: right; min-width: 50px; } .col-platform { min-width: 100px; }
+    .col-accountName { min-width: 120px; } .col-phone { min-width: 100px; }
+    .col-balance, .col-frozenBalance { text-align: right; min-width: 100px; }
+    .col-apiStatus { text-align: center; min-width: 70px; } .col-lastChangeTime { min-width: 160px; }
+    .col-statusOp { text-align: center; min-width: 170px; white-space: normal;}
+    .col-autoTransferEnabled, .col-autoTransferRoundToInteger { text-align: center; min-width: 70px;}
+    .col-autoTransferTriggerAmount { text-align: right; min-width: 80px;}
+    .col-autoTransferPayeeId { min-width: 130px;} .col-autoTransferMode { min-width: 90px;}
+    .col-autoTransferPercentage { text-align: center; min-width: 90px;}
+    #gds-account-info-table-container input[type="number"].autotransfer-setting { width: 70px; text-align: right; padding: 2px 4px; box-sizing: border-box;}
+    #gds-account-info-table-container select.autotransfer-setting { width: 100%; max-width: 120px; padding: 2px; box-sizing: border-box;}
+    #gds-account-info-table-container input[type="checkbox"].autotransfer-setting { vertical-align: middle; margin: 0; }
+    .status-enabled { color: var(--status-enabled-color); } .status-api-stopped { color: var(--status-api-stopped-color); font-weight: bold; }
+    .status-api-custom-stop { color: var(--status-api-custom-stop-color); font-weight: bold; }
+    .status-unknown { color: var(--status-unknown-color); } .status-disappeared { color: var(--status-disappeared-color); font-style: italic; }
+    .status-op-btn {
+        padding: 3px 6px; font-size: 10px; margin: 1px; border: 1px solid var(--button-border);
+        border-radius: 3px; cursor: pointer; background-color: var(--button-bg); color: var(--text-color); min-width: 45px;
+    }
+    .status-op-btn:hover { background-color: var(--button-hover-bg); border-color: var(--button-border); }
+    .status-op-btn.active { background-color: var(--button-active-bg); border-color: var(--button-active-border); color: var(--button-active-text); font-weight: bold; }
+    .status-op-btn[disabled] { cursor: not-allowed; opacity: var(--button-disabled-opacity); background-color: var(--button-disabled-bg); }
+    .balance-tier-0 {} .balance-tier-1 { color: var(--balance-tier-1-color); }
+    .balance-tier-2 { color: var(--balance-tier-2-color); } .balance-tier-3 { color: var(--balance-tier-3-color); }
+    .balance-tier-4 { color: var(--balance-tier-4-color); }
+    .bal-high { color: var(--bal-high-color) !important; font-weight: bold; }
+    .bal-negative{ color: var(--bal-negative-color) !important; font-weight: bold;}
+    .frozen-positive { color: var(--frozen-positive-color); font-weight: bold; }
+    #gds-hourly-rate-display {
+        margin-left: 15px; padding: 2px 6px; background-color: var(--hourly-rate-bg);
+        border: 1px solid var(--hourly-rate-border); border-radius: 3px; font-weight: normal; color: var(--text-color);
+    }
+    #gds-hourly-rate-display .rate-value { font-weight: bold; }
+    #gds-hourly-rate-display .rate-positive { color: var(--hourly-rate-positive-color); }
+    #gds-hourly-rate-display .rate-monday { color: var(--hourly-rate-monday-color); }
+    #gds-hourly-rate-display .rate-stagnant { color: var(--hourly-rate-stagnant-color); }
+
+
+    /* Transaction List Specific Styles */
+    #gds-transaction-list-panel { display: flex; flex-direction: column; }
+    #embed-tx-control-panel {
+      background: var(--panel-bg);
+      padding: 6px 10px; border:1px solid var(--panel-border); display: flex; flex-wrap: wrap;
+      gap: 8px; align-items: center;
+      font-family: monospace; font-size: 12px;
+      box-shadow: 0 2px 5px var(--panel-shadow); margin-bottom: 5px;
+      order: 0; /* Control panel for TX at the top of its own panel */
+    }
+    #embed-tx-column-toggle-panel { order: 1; }
+    #gds-tx-table-container { order: 2; flex-grow: 1; }
+    #embed-tx-log-container { margin-top: 10px; max-height: 100px; flex-shrink: 0; order: 3; }
+
+    #embed-tx-last-refresh-time { color: var(--text-muted-color); margin-left:10px; font-style:italic; }
+    #embed-tx-last-refresh-time.error { color: red; font-weight: bold; }
+    .col-tx-amount, .col-payout-account-balance, .col-transfer-amount-input input { text-align: right !important; }
+    .col-payout-account-selector select, .col-transfer-mode-selector select, .col-payee-selector select { min-width: 100px; }
+    .col-transfer-amount-input input { width: 80px; }
+    .action-button {
+        padding: 4px 8px; font-size: 11px; margin: 2px; border: 1px solid var(--button-border);
+        border-radius: 3px; cursor: pointer; background-color: var(--button-bg); color: var(--text-color);
+    }
+    .action-button:hover { background-color: var(--button-hover-bg); }
+    .action-button:disabled { cursor: not-allowed; opacity: var(--button-disabled-opacity); background-color: var(--button-disabled-bg); }
+    .payout-action-button { background-color: var(--action-button-color); color: white; }
+    .payout-action-button:hover { background-color: var(--action-button-hover-color); }
+    body.dark-theme .payout-action-button { color: var(--body-bg); }
+
+
+    /* Shared UI Elements */
+    #copy-toast { position: fixed; background: var(--toast-bg); color: var(--toast-text); padding: 8px 12px; border-radius: 4px; z-index: 10005; opacity: 0; transition: opacity 0.3s; pointer-events: none; font-size: 13px; box-shadow: 0 1px 3px var(--panel-shadow); }
+    #gds-fetch-status {
+        position: fixed; top: 15px; right: 20px; padding: 8px 12px; border-radius: 4px;
+        font-size: 13px; z-index: 10003; display: none; box-shadow: 0 2px 5px var(--fetch-status-shadow);
+        background-color: var(--fetch-status-info-bg); color: var(--fetch-status-info-text);
+    }
+    #gds-fetch-status.success { background-color: var(--fetch-status-success-bg); color: var(--fetch-status-success-text); border: 1px solid var(--fetch-status-success-border);}
+    #gds-fetch-status.error   { background-color: var(--fetch-status-error-bg); color: var(--fetch-status-error-text); border: 1px solid var(--fetch-status-error-border);}
+  `;
+  document.head.appendChild(style);
+
+  // ---- 共享 UI 元素 ----
+  const mainControlPanel = document.createElement('div');
+  mainControlPanel.id = 'gds-assistant-control-panel';
+  mainControlPanel.innerHTML = `
+    <div id="gds-assistant-panel-toggle-buttons">
+      <button data-panel="accountInfo" class="active">账户信息</button>
+      <button data-panel="transactionList">交易列表</button>
+    </div>
+    <button id="gds-toggle-theme" title="切换主题">切换主题</button>
+    <span id="gds-version-display" style="margin-left:auto; color: var(--text-muted-color); font-size:10px;">v${CURRENT_VERSION}</span>
+  `;
+  document.body.appendChild(mainControlPanel);
+
+  const mainContentArea = document.createElement('div');
+  mainContentArea.id = 'gds-assistant-main-content';
+  document.body.appendChild(mainContentArea);
+
+  let toast = document.getElementById('copy-toast');
+  if (!toast) { toast = document.createElement('div'); toast.id = 'copy-toast'; document.body.appendChild(toast); }
+  let fetchStatusDiv = document.getElementById('gds-fetch-status');
+  if (!fetchStatusDiv) { fetchStatusDiv = document.createElement('div'); fetchStatusDiv.id = 'gds-fetch-status'; document.body.appendChild(fetchStatusDiv); }
+
+
+  // ---- 共享 辅助函数 ----
+  function escapeHtml(str, forAttribute = false) { if (typeof str !== 'string') return str === null || str === undefined ? '' : String(str); let result = str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); if (forAttribute) result = result.replace(/"/g, '&quot;'); return result; }
+  function showToast(text, eventOrNull, duration = 1200) {
+    const x = eventOrNull ? eventOrNull.clientX + 10 : window.innerWidth / 2;
+    const y = eventOrNull ? eventOrNull.clientY + 10 : window.innerHeight / 2;
+    toast.innerText = text;
+    toast.style.left = `${x}px`;
+    toast.style.top = `${y}px`;
+    if (!eventOrNull) toast.style.transform = 'translate(-50%, -50%)'; else toast.style.transform = '';
+    toast.style.opacity = '1';
+    if (toast.timeoutId) clearTimeout(toast.timeoutId);
+    toast.timeoutId = setTimeout(() => toast.style.opacity = '0', duration);
+  }
+  function copyToClipboard(text, event) { const displayTxt = text.length > 30 ? text.substring(0,27)+'...' : text; navigator.clipboard.writeText(text).then(() => showToast(`已复制: ${displayTxt}`, event)).catch(() => { const ta = document.createElement('textarea'); ta.value = text; ta.style.position = 'absolute'; ta.style.left = '-9999px'; document.body.appendChild(ta); ta.select(); try { document.execCommand('copy'); showToast(`已复制: ${displayTxt}`, event); } catch (err) { showToast('复制失败', event); } document.body.removeChild(ta); }); }
+  function showFetchStatus(message, type = 'info', duration = 3000) { fetchStatusDiv.textContent = message; fetchStatusDiv.className = ''; fetchStatusDiv.classList.add(type); fetchStatusDiv.style.display = 'block'; if (fetchStatusDiv.timer) clearTimeout(fetchStatusDiv.timer); if (duration > 0) { fetchStatusDiv.timer = setTimeout(() => { fetchStatusDiv.style.display = 'none'; }, duration); } }
+  function formatDateTime(dateInput = new Date()) { const date = (dateInput instanceof Date) ? dateInput : new Date(dateInput); if (isNaN(date.getTime())) return 'Invalid Date'; const YYYY = date.getFullYear(); const MM = String(date.getMonth() + 1).padStart(2, '0'); const DD = String(date.getDate()).padStart(2, '0'); const HH = String(date.getHours()).padStart(2, '0'); const MIN = String(date.getMinutes()).padStart(2, '0'); const SS = String(date.getSeconds()).padStart(2, '0'); return `${YYYY}-${MM}-${DD} ${HH}:${MIN}:${SS}`; }
+  function applyTheme(theme) { document.body.classList.remove('light-theme', 'dark-theme'); document.body.classList.add(theme + '-theme'); currentTheme = theme; localStorage.setItem(KEY_THEME_PREFERENCE, theme); const themeButton = document.getElementById('gds-toggle-theme'); if (themeButton) { themeButton.textContent = theme === 'dark' ? '浅色主题' : '深色主题'; } }
+  function toggleTheme() { const newTheme = currentTheme === 'light' ? 'dark' : 'light'; applyTheme(newTheme); }
+  function loadThemePreference() { const preferredTheme = localStorage.getItem(KEY_THEME_PREFERENCE) || 'light'; applyTheme(preferredTheme); }
+
+  // ---- GM_xmlhttpRequest wrapper ----
+  function parseGmHeaders(headerStr) { const headers = new Headers(); if (!headerStr) return headers; const lines = headerStr.trim().split(/[\r\n]+/); lines.forEach(line => { const parts = line.split(': '); const key = parts.shift(); const value = parts.join(': '); if (key) { try { headers.append(key, value); } catch (e) {} } }); return headers; }
+  function gmFetch(details) {
+      return new Promise((resolve, reject) => {
+          details.timeout = details.timeout || 30000; // Default timeout 30s
+          if (details.url.startsWith('http://127.0.0.1')) { // For local dev, shorter timeout
+              details.timeout = details.timeout > 5000 ? 5000 : details.timeout;
+          }
+          GM_xmlhttpRequest({
+              method: details.method, url: details.url, headers: details.headers,
+              data: details.body, responseType: details.responseType || 'text', timeout: details.timeout,
+              onload: function(response) { resolve({ ok: response.status >= 200 && response.status < 300, status: response.status, statusText: response.statusText || (response.status === 200 ? 'OK' : `HTTP ${response.status}`), headers: parseGmHeaders(response.responseHeaders), url: response.finalUrl, text: () => Promise.resolve(response.responseText), json: () => { try { return Promise.resolve(JSON.parse(response.responseText)); } catch (e) { return Promise.reject(new Error(`Failed to parse JSON: ${e.message}`)); } }, }); },
+              onerror: function(response) { reject(new Error(`GM_xmlhttpRequest failed: ${response.statusText || 'Network error'}`)); },
+              ontimeout: function() { reject(new Error('GM_xmlhttpRequest timeout')); },
+              onabort: function() { reject(new Error('GM_xmlhttpRequest aborted')); }
+          });
+      });
+  }
+
+  // ========================================================================= //
+  // ==================== GDS 账户信息增强模块 (Account Info) ==================== //
+  // ========================================================================= //
+  const accInfoModule = (function() {
+      // ---- 常量定义 ----
+      const KEY_ACCOUNT_DATA_CACHE = 'gds_account_data_cache_v3.1.0'; const KEY_ACCOUNT_ORDER = 'gds_account_order_v3.1.0';
+      const KEY_LOGS = 'gds_account_logs_v3.1.0'; const KEY_FROZEN_LOGS = 'gds_frozen_logs_v3.1.5';
+      const KEY_COLUMN_VISIBILITY_ACC = 'gds_account_column_visibility_v3.1.8';
+      const KEY_SORT_CONFIG_ACC = 'gds_account_sort_config_v3.1.8';
+      const KEY_LAST_SUCCESSFUL_REFRESH_ACC = 'gds_account_last_successful_refresh_v3.1.8.1';
+
+      const MAX_LOG_ENTRIES = 250; const MAX_FROZEN_LOG_ENTRIES = 100; const MAX_ACCOUNT_BALANCE_HISTORY = 100;
+      const API_STATUS_ENABLED = 1; const API_STATUS_CUSTOM_STOP = 2; const API_STATUS_STOP_RECEIPT = 3; const SCRIPT_INTERNAL_STATUS_DISAPPEARED = -1;
+      const PAYEE_OPTIONS = [ { name: '承兑KVB', payeeId: 110 }, { name: '募捐', payeeId: 565 }, { name: '测试', payeeId: 1450}, { name: 'KOTAK中转', payeeId: 798} ];
+      const TRANSFER_MODE_OPTIONS = [ { name: 'IMPS', transferMode: 1 }, { name: 'NEFT', transferMode: 2 }, { name: 'RTGS', transferMode: 3 }, ];
+      const TRANSFER_PERCENTAGE_OPTIONS = [ { name: '80%', value: 0.80 }, { name: '90%', value: 0.90 }, { name: '95%', value: 0.95 }, { name: '98%', value: 0.98 }, { name: '100%', value: 1.00 } ];
+      const DEFAULT_TRIGGER_AMOUNT = 500000; const DEFAULT_TRANSFER_MODE = 3; /*RTGS*/ const DEFAULT_TRANSFER_PERCENTAGE = 0.98;
+      const AUTO_TRANSFER_THROTTLE_MS = 60 * 1000;
+      const REFRESH_INTERVAL_MS = 7000;
+
+      // ---- 全局变量 (模块作用域) ----
+      let accountDataCache = {}; let accountOrder = []; let operationLogs = []; let frozenBalanceIncreaseLogs = [];
+      let refreshIntervalId = null;
+      let columnVisibility = {};
+      let sortConfig = { key: 'id', direction: 'asc' };
+      let lastSuccessfulDataTimestamp = null;
+      let isPanelVisible = false; // Track if this panel is active
+
+      // ---- UI Elements (模块作用域) ----
+      const accountInfoPanel = document.createElement('div');
+      accountInfoPanel.id = 'gds-account-info-panel';
+      accountInfoPanel.style.display = 'none'; // Initially hidden
+
+      const accControlPanelHTML = `
+        <div id="gds-account-control-panel-inner" style="display:flex; flex-wrap:wrap; gap:8px; align-items:center; padding: 6px 10px; background: var(--panel-bg); border:1px solid var(--panel-border); margin-bottom:5px; box-shadow: 0 2px 5px var(--panel-shadow);">
+          搜索: <input id="gds-account-search" placeholder="ID/平台/账号/手机" title="可搜索多个关键词，用空格隔开" style="padding: 2px 4px; font-size:12px;"/>
+          <button id="gds-account-refresh" title="手动刷新数据" style="padding: 2px 4px; font-size:12px;">刷新</button>
+          <button id="gds-account-clear-log" title="清空账户模块操作、变动及冻结增加日志" style="padding: 2px 4px; font-size:12px;">清空日志</button>
+          <button id="gds-account-clear-prev-data" title="清空账户模块所有本地缓存数据和脚本设置" style="padding: 2px 4px; font-size:12px;">重置模块</button>
+          <span id="gds-account-last-refresh-time"></span> <span id="gds-hourly-rate-display">速度: N/A</span>
+        </div>`;
+
+      const columnTogglePanel = document.createElement('div'); columnTogglePanel.id = 'gds-account-column-toggle-panel'; columnTogglePanel.className = 'gds-column-toggle-panel';
+      const tableContainer = document.createElement('div'); tableContainer.id = 'gds-account-info-table-container'; tableContainer.className = 'gds-table-container'; tableContainer.innerHTML = '正在加载账户数据...';
+      const logDisplayContainer = document.createElement('div'); logDisplayContainer.id = 'gds-account-log-container'; logDisplayContainer.className = 'gds-log-base'; logDisplayContainer.innerHTML = '<span class="log-title">账户操作与变动日志</span>';
+      const frozenLogDisplayContainer = document.createElement('div'); frozenLogDisplayContainer.id = 'gds-frozen-log-container'; frozenLogDisplayContainer.className = 'gds-log-base'; frozenLogDisplayContainer.innerHTML = '<span class="log-title">冻结金额增加日志</span>';
+
+      accountInfoPanel.innerHTML = accControlPanelHTML;
+      accountInfoPanel.appendChild(columnTogglePanel);
+      accountInfoPanel.appendChild(tableContainer);
+      accountInfoPanel.appendChild(logDisplayContainer);
+      accountInfoPanel.appendChild(frozenLogDisplayContainer);
+
+      // ---- 列配置 ----
+      const columnConfig = [
+          { id: 'id', label: 'ID', sortable: true, hideable: false, defaultVisible: true, dataKey: 'id', cssClass: 'col-id' },
+          { id: 'platform', label: '平台', sortable: true, hideable: true, defaultVisible: true, dataKey: 'platform', cssClass: 'col-platform' },
+          { id: 'accountName', label: '账号', sortable: true, hideable: true, defaultVisible: true, dataKey: 'accountName', cssClass: 'col-accountName' },
+          { id: 'phone', label: '手机', sortable: true, hideable: true, defaultVisible: true, dataKey: 'phone', cssClass: 'col-phone' },
+          { id: 'balance', label: '余额', sortable: true, hideable: false, defaultVisible: true, dataKey: 'balance', cssClass: 'col-balance' },
+          { id: 'frozenBalance', label: '冻结', sortable: true, hideable: true, defaultVisible: true, dataKey: 'frozenBalance', cssClass: 'col-frozenBalance' },
+          { id: 'apiStatus', label: '在线状态', sortable: false, hideable: true, defaultVisible: true, dataKey: 'apiStatus', cssClass: 'col-apiStatus' },
+          { id: 'lastChangeTime', label: '金额变动时间', sortable: true, hideable: true, defaultVisible: true, dataKey: 'lastChangeTime', cssClass: 'col-lastChangeTime' },
+          { id: 'statusOp', label: '状态操作', sortable: false, hideable: true, defaultVisible: true, cssClass: 'col-statusOp' },
+          { id: 'autoTransferEnabled', label: '自动划转', sortable: false, hideable: true, defaultVisible: true, cssClass: 'col-autoTransferEnabled' },
+          { id: 'autoTransferTriggerAmount', label: '触发金额', sortable: false, hideable: true, defaultVisible: true, cssClass: 'col-autoTransferTriggerAmount' },
+          { id: 'autoTransferPayeeId', label: '收款账户', sortable: false, hideable: true, defaultVisible: true, cssClass: 'col-autoTransferPayeeId' },
+          { id: 'autoTransferMode', label: '划转模式', sortable: false, hideable: true, defaultVisible: true, cssClass: 'col-autoTransferMode' },
+          { id: 'autoTransferPercentage', label: '划转比例', sortable: false, hideable: true, defaultVisible: true, cssClass: 'col-autoTransferPercentage' },
+          { id: 'autoTransferRoundToInteger', label: '金额取整(千)', sortable: false, hideable: true, defaultVisible: true, cssClass: 'col-autoTransferRoundToInteger' },
+      ];
+
+      // ---- 辅助函数 (模块作用域) ----
+      function formatAmountAcc(amount) { const num = parseFloat(amount); if (isNaN(num)) return String(amount); return num.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+      function formatApiStatus(statusVal) { switch (parseInt(statusVal)) { case API_STATUS_ENABLED: return { text: '启用', class: 'status-enabled' }; case API_STATUS_STOP_RECEIPT: return { text: '止收', class: 'status-api-stopped' }; case API_STATUS_CUSTOM_STOP: return { text: '停止', class: 'status-api-custom-stop' }; case SCRIPT_INTERNAL_STATUS_DISAPPEARED: return { text: '已消失', class: 'status-disappeared' }; default: return { text: `未知-${statusVal}`, class: 'status-unknown' }; } }
+      function formatInterval(totalSeconds) { if (isNaN(totalSeconds) || totalSeconds < 0) return 'N/A'; if (totalSeconds === 0) return '0s'; const minutes = Math.floor(totalSeconds / 60); const seconds = totalSeconds % 60; let result = ''; if (minutes > 0) { result += `${minutes}m `; } if (seconds > 0 || minutes === 0) { result += `${seconds}s`; } return result.trim(); }
+      function addLogEntry(logEntry) { logEntry.time = formatDateTime(new Date()); operationLogs.unshift(logEntry); if (operationLogs.length > MAX_LOG_ENTRIES) operationLogs.pop(); localStorage.setItem(KEY_LOGS, JSON.stringify(operationLogs)); renderLogs(); }
+      function renderLogs() { logDisplayContainer.innerHTML = '<span class="log-title">账户操作与变动日志</span>'; operationLogs.forEach(log => { const entryDiv = document.createElement('div'); entryDiv.className = 'log-entry'; let html = `<span class="log-time">[${escapeHtml(log.time)}]</span> `; if (log.accountId) { html += `<span class="log-account-id">ID:${escapeHtml(log.accountId)}</span> `; html += `<span class="log-account-name">(${escapeHtml(log.accountName || 'N/A')})</span>: `; } html += log.message; if (log.interval && log.interval !== 'N/A') { html += ` <span class="log-interval">(间隔 ${escapeHtml(log.interval)})</span>`; } entryDiv.innerHTML = html; logDisplayContainer.appendChild(entryDiv); }); }
+      function addFrozenLogEntry(logEntry) { logEntry.time = formatDateTime(new Date()); frozenBalanceIncreaseLogs.unshift(logEntry); if (frozenBalanceIncreaseLogs.length > MAX_FROZEN_LOG_ENTRIES) { frozenBalanceIncreaseLogs.pop(); } localStorage.setItem(KEY_FROZEN_LOGS, JSON.stringify(frozenBalanceIncreaseLogs)); renderFrozenLogs(); }
+      function renderFrozenLogs() { frozenLogDisplayContainer.innerHTML = '<span class="log-title">冻结金额增加日志</span>'; frozenBalanceIncreaseLogs.forEach(log => { const entryDiv = document.createElement('div'); entryDiv.className = 'log-entry'; let html = `<span class="log-time">[${escapeHtml(log.time)}]</span> `; if (log.accountId) { html += `<span class="log-account-id">ID:${escapeHtml(log.accountId)}</span> `; html += `<span class="log-account-name">(${escapeHtml(log.accountName || 'N/A')})</span>: `; } html += log.message; entryDiv.innerHTML = html; frozenLogDisplayContainer.appendChild(entryDiv); }); }
+      function initializeAutoTransferSettings(settings) { const s = settings || {}; return { enabled: typeof s.enabled === 'boolean' ? s.enabled : false, triggerAmount: s.triggerAmount !== undefined ? s.triggerAmount : DEFAULT_TRIGGER_AMOUNT, payeeId: s.payeeId !== undefined ? s.payeeId : '', transferMode: s.transferMode !== undefined ? s.transferMode : DEFAULT_TRANSFER_MODE, roundToInteger: typeof s.roundToInteger === 'boolean' ? s.roundToInteger : false, transferPercentage: s.transferPercentage !== undefined ? s.transferPercentage : DEFAULT_TRANSFER_PERCENTAGE }; }
+      function loadColumnVisibility() { const storedVisibility = JSON.parse(localStorage.getItem(KEY_COLUMN_VISIBILITY_ACC) || '{}'); columnConfig.forEach(col => { columnVisibility[col.id] = storedVisibility[col.id] !== undefined ? storedVisibility[col.id] : col.defaultVisible; }); }
+      function saveColumnVisibility() { localStorage.setItem(KEY_COLUMN_VISIBILITY_ACC, JSON.stringify(columnVisibility)); }
+      function loadSortConfig() { const storedSortConfig = JSON.parse(localStorage.getItem(KEY_SORT_CONFIG_ACC) || '{}'); if (storedSortConfig.key && storedSortConfig.direction) { sortConfig = storedSortConfig; } }
+      function saveSortConfig() { localStorage.setItem(KEY_SORT_CONFIG_ACC, JSON.stringify(sortConfig)); }
+      function loadPersistedData() {
+          const storedCache = JSON.parse(localStorage.getItem(KEY_ACCOUNT_DATA_CACHE) || '{}');
+          for (const accId in storedCache) { storedCache[accId].autoTransferSettings = initializeAutoTransferSettings(storedCache[accId].autoTransferSettings); if (storedCache[accId].lastSuccessfulTransferTime === undefined) { storedCache[accId].lastSuccessfulTransferTime = 0; } if(!storedCache[accId].current) storedCache[accId].current = {}; if(!storedCache[accId].current.balanceHistory) { storedCache[accId].current.balanceHistory = []; } }
+          accountDataCache = storedCache;
+          accountOrder = JSON.parse(localStorage.getItem(KEY_ACCOUNT_ORDER) || '[]');
+          operationLogs = JSON.parse(localStorage.getItem(KEY_LOGS) || '[]');
+          frozenBalanceIncreaseLogs = JSON.parse(localStorage.getItem(KEY_FROZEN_LOGS) || '[]');
+          const storedTimestamp = localStorage.getItem(KEY_LAST_SUCCESSFUL_REFRESH_ACC);
+          if (storedTimestamp) {
+              lastSuccessfulDataTimestamp = new Date(storedTimestamp);
+              const lastRefreshTimeEl = document.getElementById('gds-account-last-refresh-time');
+              if(lastRefreshTimeEl) lastRefreshTimeEl.innerText = `上次成功更新: ${formatDateTime(lastSuccessfulDataTimestamp)}`;
+          }
+          loadColumnVisibility(); loadSortConfig();
+          renderLogs(); renderFrozenLogs(); renderColumnTogglePanel();
+      }
+      function calculateEstimatedHourlyRate(currentAccountCache) { const nowTs = Date.now(); let totalIncreaseInLast10Min = 0; let contributingAccountsCount = 0; const tenMinutesAgoTs = nowTs - (10 * 60 * 1000); for (const accountId in currentAccountCache) { const cacheEntry = currentAccountCache[accountId]; if (!cacheEntry || !cacheEntry.current || cacheEntry.current.isDisappeared) continue; const accData = cacheEntry.current; const currentBalance = accData.balance; if (typeof currentBalance !== 'number' || !accData.balanceHistory || accData.balanceHistory.length === 0) continue; let balanceAtApprox10MinAgo = null; for (let i = accData.balanceHistory.length - 1; i >= 0; i--) { const historyEntry = accData.balanceHistory[i]; if (historyEntry.timestamp <= tenMinutesAgoTs) { balanceAtApprox10MinAgo = historyEntry.balance; break; } } if (balanceAtApprox10MinAgo === null && accData.balanceHistory.length > 0) { const oldestEntryInHistory = accData.balanceHistory[0]; if (oldestEntryInHistory.timestamp > tenMinutesAgoTs) balanceAtApprox10MinAgo = oldestEntryInHistory.balance; } if (balanceAtApprox10MinAgo !== null && typeof balanceAtApprox10MinAgo === 'number' && currentBalance > balanceAtApprox10MinAgo) { totalIncreaseInLast10Min += (currentBalance - balanceAtApprox10MinAgo); contributingAccountsCount++; } } if (contributingAccountsCount === 0) return `速度: <span class="rate-stagnant">N/A (近10分钟无增)</span>`; const estimatedHourly = totalIncreaseInLast10Min * 6; const today = new Date(nowTs); const isMonday = today.getDay() === 1; let rateClass = "rate-positive"; let prefix = "速度"; if (isMonday) { rateClass = "rate-monday"; prefix = "预计速度"; } return `${prefix}: <span class="${rateClass}"><span class="rate-value">+${formatAmountAcc(estimatedHourly)}</span>/小时</span> <small>(${contributingAccountsCount}个账户)</small>`; }
+
+      async function fetchAccountData(isInitialLoad = false) {
+          if (!isPanelVisible && !isInitialLoad) return; // Don't fetch if panel not visible unless initial
+
+          const token = localStorage.getItem('token');
+          const lastRefreshTimeEl = document.getElementById('gds-account-last-refresh-time');
+          const fetchAttemptTime = new Date();
+
+          if (!token) {
+              showFetchStatus('未找到Token。请登录。账户模块暂停。', 'error', 0);
+              if (refreshIntervalId) clearInterval(refreshIntervalId);
+              tableContainer.innerHTML = '错误：未找到登录 Token。请登录后刷新页面。';
+              if (lastRefreshTimeEl) { lastRefreshTimeEl.innerText = `获取Token失败于: ${formatDateTime(fetchAttemptTime)}`; lastRefreshTimeEl.classList.add('error'); }
+              return;
+          }
+
+          if (lastRefreshTimeEl && !isInitialLoad) { lastRefreshTimeEl.innerText = `正在刷新... (${formatDateTime(fetchAttemptTime)})`; lastRefreshTimeEl.classList.remove('error'); }
+
+          try {
+              const response = await gmFetch({
+                  method: "GET", url: "https://admin.gdspay.xyz/api/tripartite/v1/account/view",
+                  headers: { "accept": "application/json, text/plain, */*", "authorization": token, "cache-control": "no-cache", "pragma": "no-cache" }
+              });
+              // ... (rest of fetchAccountData logic, using formatAmountAcc for display)
+              // Make sure to use formatAmountAcc when logging balance changes
+              if (response.status === 401) {
+                  console.warn('GDS 账户模块: 收到 401 未授权错误，立即刷新页面。');
+                  if (refreshIntervalId) clearInterval(refreshIntervalId);
+                  showFetchStatus('登录已过期或Token无效，正在刷新...', 'error', 0);
+                  if (lastRefreshTimeEl) { lastRefreshTimeEl.innerText = `授权失败于: ${formatDateTime(fetchAttemptTime)}. ${lastSuccessfulDataTimestamp ? '旧数据截至: ' + formatDateTime(lastSuccessfulDataTimestamp) : ''}`; lastRefreshTimeEl.classList.add('error'); }
+                  location.reload(); return;
+              }
+              if (!response.ok) {
+                  const errorText = await response.text(); console.error('账户API 获取失败:', response.status, errorText);
+                  let statusMsg = `账户API错误 ${response.status}`; if (lastSuccessfulDataTimestamp) statusMsg += `. 数据可能陈旧 (截至 ${formatDateTime(lastSuccessfulDataTimestamp)})`;
+                  showFetchStatus(statusMsg, 'error', 7000);
+                  if (lastRefreshTimeEl) { lastRefreshTimeEl.innerText = `API错误于: ${formatDateTime(fetchAttemptTime)}. ${lastSuccessfulDataTimestamp ? '旧数据截至: ' + formatDateTime(lastSuccessfulDataTimestamp) : ''}`; lastRefreshTimeEl.classList.add('error');}
+                  if (isInitialLoad && Object.keys(accountDataCache).length > 0) renderTable(); return;
+              }
+              const jsonData = await response.json();
+              if (jsonData.code !== 1 || !jsonData.data || !Array.isArray(jsonData.data.list)) {
+                  console.error('账户API 数据格式错误:', jsonData);
+                  let statusMsg = `账户API数据格式错误: ${jsonData.msg || '未知'}`; if (lastSuccessfulDataTimestamp) statusMsg += `. 数据可能陈旧 (截至 ${formatDateTime(lastSuccessfulDataTimestamp)})`;
+                  showFetchStatus(statusMsg, 'error', 7000);
+                  if (lastRefreshTimeEl) { lastRefreshTimeEl.innerText = `API数据错误于: ${formatDateTime(fetchAttemptTime)}. ${lastSuccessfulDataTimestamp ? '旧数据截至: ' + formatDateTime(lastSuccessfulDataTimestamp) : ''}`; lastRefreshTimeEl.classList.add('error');}
+                  if (isInitialLoad && Object.keys(accountDataCache).length > 0) renderTable(); return;
+              }
+
+              if (lastRefreshTimeEl) { lastRefreshTimeEl.innerText = `数据更新于: ${formatDateTime(fetchAttemptTime)}`; lastRefreshTimeEl.classList.remove('error'); }
+              lastSuccessfulDataTimestamp = fetchAttemptTime;
+              localStorage.setItem(KEY_LAST_SUCCESSFUL_REFRESH_ACC, lastSuccessfulDataTimestamp.toISOString());
+
+              const apiList = jsonData.data.list; const nowFormattedStr = formatDateTime(new Date()); const currentApiAccountIds = new Set();
+              if (accountOrder.length === 0 && apiList.length > 0 && isInitialLoad) { accountOrder = apiList.map(item => String(item.accountId)); }
+
+              apiList.forEach(apiItem => {
+                  const accountIdStr = String(apiItem.accountId); currentApiAccountIds.add(accountIdStr);
+                  let cacheEntry = accountDataCache[accountIdStr]; if (!cacheEntry) { cacheEntry = { current: {}, autoTransferSettings: initializeAutoTransferSettings(null), lastSuccessfulTransferTime: 0 }; accountDataCache[accountIdStr] = cacheEntry; } else { cacheEntry.autoTransferSettings = initializeAutoTransferSettings(cacheEntry.autoTransferSettings); }
+                  if (!cacheEntry.current) cacheEntry.current = {}; if (cacheEntry.lastSuccessfulTransferTime === undefined) cacheEntry.lastSuccessfulTransferTime = 0; if (!cacheEntry.current.balanceHistory) cacheEntry.current.balanceHistory = [];
+                  const prevData = { ...cacheEntry.current };
+                  const currentData = { id: accountIdStr, platform: apiItem.tripartiteId, accountName: apiItem.accountName, phone: apiItem.otpReceiver, balance: parseFloat(apiItem.balance) / 100, frozenBalance: parseFloat(apiItem.frozenBalance) / 100, apiStatus: parseInt(apiItem.accountStatus), description: apiItem.description, lastHeartbeatTime: apiItem.lastHeartbeatTime ? formatDateTime(new Date(apiItem.lastHeartbeatTime)) : null, lastChangeTime: prevData.lastChangeTime || nowFormattedStr, isDisappeared: false, balanceHistory: prevData.balanceHistory ? [...prevData.balanceHistory] : [] };
+                  if(!prevData.lastChangeTime){ currentData.lastChangeTime = nowFormattedStr; }
+
+                  if (!isInitialLoad) {
+                      if (prevData.balance !== undefined && prevData.balance > 0 && currentData.balance === 0) { console.warn(`GDS 账户 (ID: ${accountIdStr}): API returned balance 0, previous was ${formatAmountAcc(prevData.balance)}. Using previous value.`); currentData.balance = prevData.balance; }
+                      if (prevData.frozenBalance !== undefined && prevData.frozenBalance > 0 && currentData.frozenBalance === 0) { console.warn(`GDS 账户 (ID: ${accountIdStr}): API returned frozenBalance 0, previous was ${formatAmountAcc(prevData.frozenBalance)}. Using previous value.`); currentData.frozenBalance = prevData.frozenBalance; }
+                  }
+
+                  let significantAmountChangeMade = false; let logMessageParts = [];
+                  if (prevData.balance !== undefined && currentData.balance !== prevData.balance) { const diff = currentData.balance - prevData.balance; const diffStr = `(${diff > 0 ? '+' : ''}${formatAmountAcc(diff)})`; const diffClass = diff > 0 ? 'log-amount-increase' : 'log-amount-decrease'; logMessageParts.push(`余额: ${formatAmountAcc(prevData.balance)} → ${formatAmountAcc(currentData.balance)} <span class="${diffClass}">${diffStr}</span>`); significantAmountChangeMade = true; }
+                  if (prevData.frozenBalance !== undefined && currentData.frozenBalance !== prevData.frozenBalance) { const diff = currentData.frozenBalance - prevData.frozenBalance; const diffStr = `(${diff > 0 ? '+' : ''}${formatAmountAcc(diff)})`; const diffClass = diff > 0 ? 'log-amount-increase' : (diff < 0 ? 'log-amount-decrease' : ''); const fontWeight = diff > 0 ? 'font-weight:bold;' : ''; logMessageParts.push(`冻结: ${formatAmountAcc(prevData.frozenBalance)} → ${formatAmountAcc(currentData.frozenBalance)} <span class="${diffClass}" style="${fontWeight}">${diffStr}</span>`); significantAmountChangeMade = true; if (diff > 0 && prevData.frozenBalance >= 0 && !isInitialLoad) { const frozenLogMsg = `冻结金额增加: ${formatAmountAcc(prevData.frozenBalance)} → ${formatAmountAcc(currentData.frozenBalance)} <span class="log-amount-increase" style="font-weight:bold;">${diffStr}</span>`; addFrozenLogEntry({ accountId: accountIdStr, accountName: currentData.accountName, message: frozenLogMsg }); } }
+                  if (significantAmountChangeMade) { currentData.lastChangeTime = nowFormattedStr; }
+                  if (prevData.apiStatus !== undefined && currentData.apiStatus !== prevData.apiStatus) { const statusChangeMsg = `在线状态: ${formatApiStatus(prevData.apiStatus).text} → <span class="log-status-change">${formatApiStatus(currentData.apiStatus).text}</span>`; if (!significantAmountChangeMade && !isInitialLoad) { addLogEntry({ accountId: accountIdStr, accountName: currentData.accountName, message: statusChangeMsg }); } else if (significantAmountChangeMade) { logMessageParts.push(statusChangeMsg); } }
+                  if (significantAmountChangeMade && !isInitialLoad && logMessageParts.length > 0) { let intervalStr = 'N/A'; if (prevData.lastChangeTime) { const prevDate = new Date(prevData.lastChangeTime.replace(/-/g, '/')); const currChangeDate = new Date(currentData.lastChangeTime.replace(/-/g, '/')); if (!isNaN(prevDate) && !isNaN(currChangeDate)) { const diffMs = currChangeDate.getTime() - prevDate.getTime(); if (diffMs >= 0) { intervalStr = formatInterval(Math.round(diffMs / 1000)); } } } addLogEntry({ accountId: accountIdStr, accountName: currentData.accountName, message: logMessageParts.join('， '), interval: intervalStr }); }
+                  currentData.balanceHistory.push({ timestamp: Date.now(), balance: currentData.balance }); if (currentData.balanceHistory.length > MAX_ACCOUNT_BALANCE_HISTORY) { currentData.balanceHistory.shift(); }
+                  cacheEntry.current = currentData; if (accountOrder.indexOf(accountIdStr) === -1) accountOrder.push(accountIdStr);
+              });
+              accountOrder.forEach(accountIdStr => { if (!currentApiAccountIds.has(accountIdStr)) { const cacheEntry = accountDataCache[accountIdStr]; if (cacheEntry && cacheEntry.current && !cacheEntry.current.isDisappeared) { cacheEntry.current.isDisappeared = true; cacheEntry.current.apiStatus = SCRIPT_INTERNAL_STATUS_DISAPPEARED; addLogEntry({ accountId: accountIdStr, accountName: cacheEntry.current.accountName, message: '<span class="status-disappeared">账号在API响应中消失</span>' }); } } });
+              localStorage.setItem(KEY_ACCOUNT_DATA_CACHE, JSON.stringify(accountDataCache)); localStorage.setItem(KEY_ACCOUNT_ORDER, JSON.stringify(accountOrder));
+              renderTable();
+              const hourlyRateDisplay = document.getElementById('gds-hourly-rate-display');
+              if (hourlyRateDisplay) hourlyRateDisplay.innerHTML = calculateEstimatedHourlyRate(accountDataCache);
+              checkAndPerformAutoTransfers();
+          } catch (error) {
+              console.error('FetchAccountData 异常:', error);
+              let statusMsg = `账户脚本错误: ${error.message}`; if (lastSuccessfulDataTimestamp) statusMsg += `. 数据可能陈旧 (截至 ${formatDateTime(lastSuccessfulDataTimestamp)})`;
+              showFetchStatus(statusMsg, 'error', 7000);
+              if (lastRefreshTimeEl) { lastRefreshTimeEl.innerText = `脚本错误于: ${formatDateTime(fetchAttemptTime)}. ${lastSuccessfulDataTimestamp ? '旧数据截至: ' + formatDateTime(lastSuccessfulDataTimestamp) : ''}`; lastRefreshTimeEl.classList.add('error');}
+              tableContainer.innerHTML = `获取数据时发生脚本错误: ${error.message}。请检查控制台。`;
+              if (isInitialLoad && Object.keys(accountDataCache).length > 0) renderTable();
+          }
+      }
+
+      function renderColumnTogglePanel() {
+          let html = '列显示控制: ';
+          columnConfig.forEach(col => { if (col.hideable) { html += `<label title="${escapeHtml(col.label, true)}"><input type="checkbox" data-col-id="${escapeHtml(col.id)}" ${columnVisibility[col.id] ? 'checked' : ''}> ${escapeHtml(col.label)}</label>`; } });
+          columnTogglePanel.innerHTML = html;
+      }
+      function handleColumnToggle(event) { const checkbox = event.target; if (checkbox.type === 'checkbox' && checkbox.dataset.colId) { const colId = checkbox.dataset.colId; columnVisibility[colId] = checkbox.checked; saveColumnVisibility(); renderTable(); } }
+      function handleHeaderClick(event) { const th = event.target.closest('th'); if (!th || !th.dataset.colId) return; const colId = th.dataset.colId; const col = columnConfig.find(c => c.id === colId); if (!col || !col.sortable) return; if (sortConfig.key === colId) { sortConfig.direction = sortConfig.direction === 'asc' ? 'desc' : 'asc'; } else { sortConfig.key = colId; sortConfig.direction = 'asc'; } saveSortConfig(); renderTable(); }
+
+      function renderTable() {
+          let headerHtml = '<thead><tr>';
+          columnConfig.forEach(col => { let thClass = col.cssClass || ''; if (!columnVisibility[col.id]) thClass += ' gds-col-hidden'; if (col.sortable) thClass += ' sortable'; let sortIndicator = ''; if (col.sortable && sortConfig.key === col.id) { sortIndicator = sortConfig.direction === 'asc' ? ' ▲' : ' ▼'; } headerHtml += `<th class="${thClass}" data-col-id="${col.id}" title="${escapeHtml(col.label, true)} ${col.sortable ? '(可排序)' : ''}">${escapeHtml(col.label)}${sortIndicator}</th>`; });
+          headerHtml += '</tr></thead>';
+          const searchInput = document.getElementById('gds-account-search');
+          const searchTerm = searchInput ? searchInput.value.toLowerCase().trim() : '';
+          const searchKeywords = searchTerm ? searchTerm.split(/\s+/).filter(k => k) : [];
+          let sortedAccountData = accountOrder.map(id => accountDataCache[id]).filter(Boolean);
+          if (sortConfig.key) { const sortCol = columnConfig.find(c => c.id === sortConfig.key); if (sortCol && sortCol.dataKey) { sortedAccountData.sort((a, b) => { let valA = a.current?.[sortCol.dataKey]; let valB = b.current?.[sortCol.dataKey]; if (typeof valA === 'string' && typeof valB === 'string') { valA = valA.toLowerCase(); valB = valB.toLowerCase(); } else if (sortCol.dataKey === 'lastChangeTime') { valA = valA ? new Date(String(valA).replace(/-/g, '/')).getTime() : 0; valB = valB ? new Date(String(valB).replace(/-/g, '/')).getTime() : 0; } else { valA = String(valA).toLowerCase(); valB = String(valB).toLowerCase(); } if (valA < valB) return sortConfig.direction === 'asc' ? -1 : 1; if (valA > valB) return sortConfig.direction === 'asc' ? 1 : -1; return 0; }); } }
+          let bodyHtml = '<tbody>';
+          sortedAccountData.forEach(cacheEntry => {
+              if (!cacheEntry || !cacheEntry.current) return; const acc = cacheEntry.current; const settings = cacheEntry.autoTransferSettings;
+              if (searchKeywords.length > 0) { const searchableText = `${acc.id} ${acc.platform} ${acc.accountName} ${acc.phone}`.toLowerCase(); if (!searchKeywords.every(keyword => searchableText.includes(keyword))) return; }
+              let rowHtml = `<tr data-account-id="${escapeHtml(acc.id)}">`;
+              columnConfig.forEach(col => {
+                  let cellClass = col.cssClass || ''; if (!columnVisibility[col.id]) cellClass += ' gds-col-hidden'; let cellContent = '';
+                  switch (col.id) {
+                      case 'id': cellContent = escapeHtml(acc.id); break;
+                      case 'platform': cellContent = escapeHtml(acc.platform); break;
+                      case 'accountName': cellContent = `<td class="${cellClass}" title="${escapeHtml(acc.description, true)}">${escapeHtml(acc.accountName)}</td>`; rowHtml += cellContent; return;
+                      case 'phone': cellContent = escapeHtml(acc.phone); break;
+                      case 'balance': let balanceCellClasses = cellClass; if (acc.balance >= 0 && acc.balance < 200000) { let tierSuffix = '0'; if (acc.balance >= 150000) tierSuffix = '4'; else if (acc.balance >= 100000) tierSuffix = '3'; else if (acc.balance >= 50000) tierSuffix = '2'; else if (acc.balance >= 10000) tierSuffix = '1'; balanceCellClasses += ` balance-tier-${tierSuffix}`; } if (acc.balance >= 200000) balanceCellClasses += ' bal-high'; else if (acc.balance < 0) balanceCellClasses += ' bal-negative'; cellContent = `<td class="${balanceCellClasses}">${formatAmountAcc(acc.balance)}</td>`; rowHtml += cellContent; return;
+                      case 'frozenBalance': const frozenCls = acc.frozenBalance > 0 ? 'frozen-positive' : ''; cellContent = `<td class="${cellClass} ${frozenCls}">${formatAmountAcc(acc.frozenBalance)}</td>`; rowHtml += cellContent; return;
+                      case 'apiStatus': const statusInfo = formatApiStatus(acc.apiStatus); cellContent = `<td class="${cellClass} ${escapeHtml(statusInfo.class, true)}">${escapeHtml(statusInfo.text)}</td>`; rowHtml += cellContent; return;
+                      case 'lastChangeTime': cellContent = acc.lastChangeTime ? escapeHtml(acc.lastChangeTime) : 'N/A'; break;
+                      case 'statusOp': cellContent = `<button class="status-op-btn ${acc.apiStatus === API_STATUS_ENABLED && !acc.isDisappeared ? 'active' : ''}" data-op="set-status" data-status="${API_STATUS_ENABLED}">启用</button> <button class="status-op-btn ${acc.apiStatus === API_STATUS_STOP_RECEIPT && !acc.isDisappeared ? 'active' : ''}" data-op="set-status" data-status="${API_STATUS_STOP_RECEIPT}">止收</button> <button class="status-op-btn ${acc.apiStatus === API_STATUS_CUSTOM_STOP && !acc.isDisappeared ? 'active' : ''}" data-op="set-status" data-status="${API_STATUS_CUSTOM_STOP}">停止</button>`; break;
+                      case 'autoTransferEnabled': cellContent = `<input type="checkbox" class="autotransfer-setting" data-setting="enabled" ${settings.enabled ? 'checked' : ''}/>`; break;
+                      case 'autoTransferTriggerAmount': cellContent = `<input type="number" class="autotransfer-setting" data-setting="triggerAmount" value="${escapeHtml(String(settings.triggerAmount), true)}" placeholder="金额"/>`; break;
+                      case 'autoTransferPayeeId': let payeeOptionsHtml = PAYEE_OPTIONS.map(opt => `<option value="${opt.payeeId}" ${String(settings.payeeId) === String(opt.payeeId) ? 'selected' : ''}>${escapeHtml(opt.name)}</option>`).join(''); cellContent = `<select class="autotransfer-setting" data-setting="payeeId"><option value="">--选择--</option>${payeeOptionsHtml}</select>`; break;
+                      case 'autoTransferMode': let modeOptionsHtml = TRANSFER_MODE_OPTIONS.map(opt => `<option value="${opt.transferMode}" ${String(settings.transferMode) === String(opt.transferMode) ? 'selected' : ''}>${escapeHtml(opt.name)}</option>`).join(''); cellContent = `<select class="autotransfer-setting" data-setting="transferMode"><option value="">--选择--</option>${modeOptionsHtml}</select>`; break;
+                      case 'autoTransferPercentage': let percentageOptionsHtml = TRANSFER_PERCENTAGE_OPTIONS.map(opt => `<option value="${opt.value}" ${parseFloat(settings.transferPercentage) === opt.value ? 'selected' : ''}>${escapeHtml(opt.name)}</option>`).join(''); cellContent = `<select class="autotransfer-setting" data-setting="transferPercentage">${percentageOptionsHtml}</select>`; break;
+                      case 'autoTransferRoundToInteger': cellContent = `<input type="checkbox" class="autotransfer-setting" data-setting="roundToInteger" ${settings.roundToInteger ? 'checked' : ''}/>`; break;
+                      default: cellContent = `N/A_col:${escapeHtml(col.id)}`;
+                  }
+                  if (!['accountName', 'balance', 'frozenBalance', 'apiStatus'].includes(col.id)) { rowHtml += `<td class="${cellClass}">${cellContent}</td>`; }
+              });
+              rowHtml += `</tr>`; bodyHtml += rowHtml;
+          });
+          bodyHtml += `</tbody>`; tableContainer.innerHTML = `<table>${headerHtml}${bodyHtml}</table>`;
+          const table = tableContainer.querySelector('table'); if (table) { const thead = table.querySelector('thead'); if (thead) { thead.removeEventListener('click', handleHeaderClick); thead.addEventListener('click', handleHeaderClick); } }
+      }
+
+      function handleAutoTransferSettingChange(event) {
+          const target = event.target; if (!target.classList.contains('autotransfer-setting')) return;
+          const accountId = target.closest('tr').dataset.accountId; if (!accountId || !accountDataCache[accountId]) return;
+          const oldSettings = { ...accountDataCache[accountId].autoTransferSettings }; const settingName = target.dataset.setting;
+          let newValue = (target.type === 'checkbox') ? target.checked : target.value; let displayValue = newValue;
+          if (settingName === 'triggerAmount') { const numValue = parseFloat(newValue); if (newValue !== '' && (isNaN(numValue) || numValue < 0)) { showToast('触发金额必须是有效的非负数字或为空', event); target.value = oldSettings[settingName] || ''; return; } newValue = newValue === '' ? '' : numValue; displayValue = newValue === '' ? '(空)' : formatAmountAcc(newValue); }
+          else if (settingName === 'payeeId' || settingName === 'transferMode') { newValue = newValue === '' ? '' : parseInt(newValue, 10); if (settingName === 'payeeId') { const selectedOption = PAYEE_OPTIONS.find(opt => opt.payeeId === newValue); displayValue = selectedOption ? selectedOption.name : (newValue === '' ? '(空)' : `PayeeID ${newValue}`); } else { const selectedOption = TRANSFER_MODE_OPTIONS.find(opt => opt.transferMode === newValue); displayValue = selectedOption ? selectedOption.name : (newValue === '' ? '(空)' : `Mode ${newValue}`); } }
+          else if (settingName === 'transferPercentage') { newValue = parseFloat(newValue); const selectedOption = TRANSFER_PERCENTAGE_OPTIONS.find(opt => opt.value === newValue); displayValue = selectedOption ? selectedOption.name : `${(newValue * 100).toFixed(0)}%`; }
+          else if (settingName === 'enabled' || settingName === 'roundToInteger') { displayValue = newValue ? '是' : '否'; }
+          if (settingName === 'transferPercentage') { if (oldSettings.transferPercentage === newValue) return; } else if (settingName === 'triggerAmount') { if (oldSettings.triggerAmount === newValue) return; } else { if (oldSettings[settingName] === newValue) return; }
+          accountDataCache[accountId].autoTransferSettings[settingName] = newValue; localStorage.setItem(KEY_ACCOUNT_DATA_CACHE, JSON.stringify(accountDataCache));
+          let settingDisplayName = settingName; let oldDisplayValue = oldSettings[settingName];
+          switch(settingName) { case 'enabled': settingDisplayName = '开启自动划转'; oldDisplayValue = oldSettings.enabled ? '是' : '否'; break; case 'triggerAmount': settingDisplayName = '触发金额'; oldDisplayValue = oldSettings.triggerAmount === '' || oldSettings.triggerAmount === undefined ? '(空)' : formatAmountAcc(oldSettings.triggerAmount); break; case 'payeeId': settingDisplayName = '收款账户'; const oldPayeeOpt = PAYEE_OPTIONS.find(opt => opt.payeeId === oldSettings.payeeId); oldDisplayValue = oldPayeeOpt ? oldPayeeOpt.name : (oldSettings.payeeId === '' || oldSettings.payeeId === undefined ? '(空)' : `PayeeID ${oldSettings.payeeId}`); break; case 'transferMode': settingDisplayName = '划转模式'; const oldModeOpt = TRANSFER_MODE_OPTIONS.find(opt => opt.transferMode === oldSettings.transferMode); oldDisplayValue = oldModeOpt ? oldModeOpt.name : (oldSettings.transferMode === '' || oldSettings.transferMode === undefined ? '(空)' : `Mode ${oldSettings.transferMode}`); break; case 'transferPercentage': settingDisplayName = '划转比例'; const oldPercOpt = TRANSFER_PERCENTAGE_OPTIONS.find(opt => opt.value === oldSettings.transferPercentage); oldDisplayValue = oldPercOpt ? oldPercOpt.name : (oldSettings.transferPercentage !== undefined ? `${(oldSettings.transferPercentage * 100).toFixed(0)}%` : '(空)'); break; case 'roundToInteger': settingDisplayName = '金额取整(千)'; oldDisplayValue = oldSettings.roundToInteger ? '是' : '否'; break; }
+          addLogEntry({ accountId, accountName: accountDataCache[accountId].current?.accountName || 'N/A', message: `<span class="log-setting-change">自动划转设置: ${escapeHtml(settingDisplayName)} 从 "${escapeHtml(String(oldDisplayValue))}" 改为 "${escapeHtml(String(displayValue))}"</span>` });
+          showToast(`ID ${accountId}: "${escapeHtml(settingDisplayName)}" 已更新`, event);
+          if (settingName === 'enabled' && newValue === true) { checkAndPerformAutoTransfers(accountId); }
+      }
+      async function checkAndPerformAutoTransfers(specificAccountId = null) {
+          const accountsToCheck = specificAccountId ? [specificAccountId] : Object.keys(accountDataCache);
+          for (const accountId of accountsToCheck) {
+              const cacheEntry = accountDataCache[accountId]; if (!cacheEntry || !cacheEntry.current || !cacheEntry.autoTransferSettings || !cacheEntry.autoTransferSettings.enabled) { continue; }
+              const acc = cacheEntry.current; const settings = cacheEntry.autoTransferSettings; if (acc.isDisappeared || (acc.apiStatus !== API_STATUS_ENABLED && acc.apiStatus !== API_STATUS_STOP_RECEIPT)) { continue; }
+              const triggerAmount = parseFloat(settings.triggerAmount); if (isNaN(triggerAmount) || triggerAmount <= 0) continue;
+              if (acc.balance > triggerAmount) {
+                  const now = Date.now(); if (cacheEntry.lastSuccessfulTransferTime && (now - cacheEntry.lastSuccessfulTransferTime < AUTO_TRANSFER_THROTTLE_MS)) { addLogEntry({ accountId, accountName: acc.accountName, message: `<span class="log-transfer-throttled">自动划转节流 (1分钟内已成功划转)</span>` }); continue; }
+                  if (!settings.payeeId || !settings.transferMode) { addLogEntry({ accountId, accountName: acc.accountName, message: `<span class="log-transfer-fail">自动划转配置不完整 (收款账户或模式未选)</span>` }); continue; }
+                  const transferPercentage = parseFloat(settings.transferPercentage); if (isNaN(transferPercentage) || transferPercentage <= 0 || transferPercentage > 1) { addLogEntry({ accountId, accountName: acc.accountName, message: `<span class="log-transfer-fail">自动划转失败: 无效的划转比例 (${escapeHtml(String(settings.transferPercentage))})</span>` }); continue; }
+                  let transferAmountBase = acc.balance * transferPercentage; let amountInCents;
+                  if (settings.roundToInteger) { let truncatedAmount = Math.floor(transferAmountBase / 1000) * 1000; amountInCents = Math.floor(truncatedAmount * 100); } else { amountInCents = Math.floor(Math.floor(transferAmountBase) * 100); }
+                  if (amountInCents <= 0) { addLogEntry({ accountId, accountName: acc.accountName, message: `<span class="log-transfer-fail">计算后划转金额为0或负数 (${formatAmountAcc(amountInCents/100)})，不执行</span>` }); continue; }
+                  const token = localStorage.getItem('token'); if (!token) { console.warn("Token缺失，无法执行自动划转"); continue; }
+                  const requestId = `req-${Date.now()}-${Math.random().toString(36).substring(2, 10)}`; const version = Date.now();
+                  const payload = { tripartiteId: acc.platform, accountName: acc.accountName, payeeId: parseInt(settings.payeeId), amount: amountInCents, transferMode: parseInt(settings.transferMode), isBulk: false, version: version };
+                  const payeeName = PAYEE_OPTIONS.find(p => p.payeeId === payload.payeeId)?.name || `PayeeID ${payload.payeeId}`; const modeName = TRANSFER_MODE_OPTIONS.find(m => m.transferMode === payload.transferMode)?.name || `Mode ${payload.transferMode}`;
+                  addLogEntry({ accountId, accountName: acc.accountName, message: `<span class="log-transfer-attempt">尝试自动划转 ${formatAmountAcc(amountInCents / 100)} 到 ${escapeHtml(payeeName)} (模式: ${escapeHtml(modeName)})</span>` });
+                  showFetchStatus(`ID ${accountId}: 尝试自动划转 ${formatAmountAcc(amountInCents / 100)}...`, 'info', 5000);
+                  try {
+                      const response = await gmFetch({ method: "POST", url: "https://admin.gdspay.xyz/api/tripartite/v1/transfer/manual", headers: { "accept": "application/json, text/plain, */*", "authorization": token, "content-type": "application/json", "X-Request-ID": requestId, "cache-control": "no-cache", "pragma": "no-cache" }, body: JSON.stringify(payload) });
+                      const result = await response.json();
+                      if (result?.code === 1) { cacheEntry.lastSuccessfulTransferTime = Date.now(); localStorage.setItem(KEY_ACCOUNT_DATA_CACHE, JSON.stringify(accountDataCache)); addLogEntry({ accountId, accountName: acc.accountName, message: `<span class="log-transfer-success">自动划转 ${formatAmountAcc(amountInCents / 100)} 到 ${escapeHtml(payeeName)} 成功!</span> (Version: ${version})` }); showFetchStatus(`ID ${accountId}: 自动划转成功!`, 'success', 3000); }
+                      else { addLogEntry({ accountId, accountName: acc.accountName, message: `<span class="log-transfer-fail">自动划转 ${formatAmountAcc(amountInCents / 100)} 失败: ${escapeHtml(result?.msg || '未知错误')}</span>` }); showFetchStatus(`ID ${accountId}: 自动划转失败 - ${result?.msg}`, 'error', 5000); }
+                  } catch (err) { console.error(`ID ${accountId}: 自动划转 API 请求错误:`, err); addLogEntry({ accountId, accountName: acc.accountName, message: `<span class="log-transfer-fail">自动划转 ${formatAmountAcc(amountInCents / 100)} 请求异常: ${escapeHtml(err.message)}</span>` }); showFetchStatus(`ID ${accountId}: 自动划转请求异常`, 'error', 5000); }
+              }
+          }
+      }
+      async function handleTableClick(event) {
+          const target = event.target;
+          if (event.button === 2 && target.tagName === 'TD') { event.preventDefault(); const text = target.innerText.trim(); if (text) copyToClipboard(text, event); return; }
+          if (target.classList.contains('status-op-btn') && target.dataset.op === 'set-status') {
+              const accountId = target.closest('tr').dataset.accountId; const newApiStatus = parseInt(target.dataset.status); if (!accountId || isNaN(newApiStatus)) return;
+              const accCache = accountDataCache[accountId]; if (!accCache || !accCache.current) { showToast('账户数据异常', event); return; }
+              const { accountName, platform: tripartiteId } = accCache.current; const token = localStorage.getItem('token'); if (!token) { showToast('Token缺失', event); return; }
+              const oldApiStatus = accCache.current.apiStatus; if (oldApiStatus === newApiStatus && !accCache.current.isDisappeared) { showToast('状态未改变', event, 800); return; }
+              target.closest('td').querySelectorAll('.status-op-btn').forEach(btn => btn.disabled = true); showFetchStatus(`ID ${accountId}: 设置状态为 "${formatApiStatus(newApiStatus).text}"...`, 'info', 0);
+              try {
+                  const payload = { accountId: parseInt(accountId), accountName, tripartiteId, accountStatus: newApiStatus };
+                  const response = await gmFetch({ method: "POST", url: "https://admin.gdspay.xyz/api/tripartite/v1/account/status/modify", headers: { "accept": "application/json, text/plain, */*", "authorization": token, "content-type": "application/json", "cache-control": "no-cache", "pragma": "no-cache" }, body: JSON.stringify(payload) });
+                  const result = await response.json();
+                  if (result.code === 1) { showFetchStatus(`ID ${accountId}: 状态设置成功!`, 'success', 2500); accCache.current.apiStatus = newApiStatus; target.closest('td').querySelectorAll('.status-op-btn').forEach(btn => { btn.classList.toggle('active', parseInt(btn.dataset.status) === newApiStatus && !accCache.current.isDisappeared); }); const statusCell = target.closest('tr').querySelector('.col-apiStatus'); if (statusCell) { const newStatusInfo = formatApiStatus(newApiStatus); statusCell.className = `col-apiStatus ${escapeHtml(newStatusInfo.class, true)} ${columnVisibility['apiStatus'] ? '' : 'gds-col-hidden'}`; statusCell.innerText = escapeHtml(newStatusInfo.text); } addLogEntry({ accountId, accountName, message: `手动操作: 在线状态从 ${formatApiStatus(oldApiStatus).text} → <span class="log-status-change">${formatApiStatus(newApiStatus).text}</span> <span class="log-api-op-success">(成功)</span>` });
+                  } else { showFetchStatus(`ID ${accountId}: 状态设置失败 - ${result.msg || '未知错误'}`, 'error', 4000); addLogEntry({ accountId, accountName, message: `手动操作: 在线状态从 ${formatApiStatus(oldApiStatus).text} → ${formatApiStatus(newApiStatus).text} <span class="log-api-op-fail">(失败: ${escapeHtml(result.msg)})</span>` }); }
+              } catch (err) { console.error('设置状态API请求错误:', err); showFetchStatus(`ID ${accountId}: 状态设置请求异常 - ${err.message}`, 'error', 4000); addLogEntry({ accountId, accountName: accCache.current.accountName, message: `手动操作: 在线状态从 ${formatApiStatus(oldApiStatus).text} → ${formatApiStatus(newApiStatus).text} <span class="log-api-op-fail">(请求异常)</span>` });
+              } finally { target.closest('td').querySelectorAll('.status-op-btn').forEach(btn => btn.disabled = false); }
+          }
+      }
+
+      function setupEventListeners() {
+          tableContainer.addEventListener('click', handleTableClick);
+          tableContainer.addEventListener('contextmenu', handleTableClick);
+          tableContainer.addEventListener('change', handleAutoTransferSettingChange);
+          columnTogglePanel.addEventListener('change', handleColumnToggle);
+
+          const searchInput = document.getElementById('gds-account-search');
+          if (searchInput) searchInput.addEventListener('input', renderTable);
+
+          const refreshButton = document.getElementById('gds-account-refresh');
+          if (refreshButton) refreshButton.addEventListener('click', () => fetchAccountData());
+
+          const clearLogButton = document.getElementById('gds-account-clear-log');
+          if (clearLogButton) clearLogButton.addEventListener('click', (event) => { if (confirm('确定要清空账户模块所有操作、变动及冻结增加日志吗？')) { operationLogs = []; localStorage.removeItem(KEY_LOGS); renderLogs(); frozenBalanceIncreaseLogs = []; localStorage.removeItem(KEY_FROZEN_LOGS); renderFrozenLogs(); showToast('账户模块日志已清空', event); } });
+
+          const clearDataButton = document.getElementById('gds-account-clear-prev-data');
+          if (clearDataButton) clearDataButton.addEventListener('click', (event) => {
+              if (confirm('警告：这将清空账户模块所有本地缓存的账户数据、排序、列显示和日志！\n确定要重置账户模块吗？')) {
+                  localStorage.removeItem(KEY_ACCOUNT_DATA_CACHE); localStorage.removeItem(KEY_ACCOUNT_ORDER); localStorage.removeItem(KEY_LOGS); localStorage.removeItem(KEY_FROZEN_LOGS); localStorage.removeItem(KEY_COLUMN_VISIBILITY_ACC); localStorage.removeItem(KEY_SORT_CONFIG_ACC); localStorage.removeItem(KEY_LAST_SUCCESSFUL_REFRESH_ACC);
+                  accountDataCache = {}; accountOrder = []; operationLogs = []; frozenBalanceIncreaseLogs = []; sortConfig = { key: 'id', direction: 'asc' }; lastSuccessfulDataTimestamp = null;
+                  const lastRefreshTimeEl = document.getElementById('gds-account-last-refresh-time'); if(lastRefreshTimeEl) { lastRefreshTimeEl.innerText = '数据未加载'; lastRefreshTimeEl.classList.remove('error'); }
+                  loadColumnVisibility(); renderTable(); renderLogs(); renderFrozenLogs(); renderColumnTogglePanel(); showToast('账户模块数据已重置!', event);
+                  fetchAccountData(true);
+              }
+          });
+      }
+
+      function init() {
+          mainContentArea.appendChild(accountInfoPanel);
+          loadPersistedData();
+          setupEventListeners();
+          // Initial fetch will be triggered by panel switch if it's the active one, or on first load.
+      }
+
+      function startAutoRefresh() {
+          if (localStorage.getItem('token')) {
+              if (refreshIntervalId) clearInterval(refreshIntervalId);
+              refreshIntervalId = setInterval(() => { if (isPanelVisible) fetchAccountData(false); }, REFRESH_INTERVAL_MS);
+          } else { console.warn("账户模块: 未找到 Token，自动刷新已禁用。"); }
+      }
+      function stopAutoRefresh() { if (refreshIntervalId) clearInterval(refreshIntervalId); refreshIntervalId = null; }
+
+      return {
+          init,
+          show: () => { accountInfoPanel.style.display = 'flex'; isPanelVisible = true; if (Object.keys(accountDataCache).length === 0) fetchAccountData(true); startAutoRefresh(); },
+          hide: () => { accountInfoPanel.style.display = 'none'; isPanelVisible = false; stopAutoRefresh(); },
+          getAccountCache: () => accountDataCache // Expose for TX module
+      };
+  })();
+
+
+  // ========================================================================= //
+  // ================= GDS 交易列表集成模块 (Transaction List) ================= //
+  // ========================================================================= //
+  const txListModule = (function() {
+      // ---- API URLs and Keys ----
+      const TRANSACTION_DATA_URL = 'http://127.0.0.1:5000/transactions';
+      const GDS_PAYEE_LIST_API_URL_TEMPLATE = 'https://admin.gdspay.xyz/api/tripartite/v1/payee/list?search={ACCOUNT_NO}&page=1&pageSize=50';
+      const GDS_TRANSFER_API_URL = 'https://admin.gdspay.xyz/api/tripartite/v1/transfer/manual';
+      const KEY_TRANSACTION_LOGS_TX = 'gds_embed_tx_logs_v1.3.0'; // Renamed to avoid conflict
+      const KEY_COLUMN_VISIBILITY_EMBED_TX = 'gds_embed_tx_column_visibility_v1.3.0';
+      const KEY_SORT_CONFIG_EMBED_TX = 'gds_embed_tx_sort_config_v1.3.0';
+      const KEY_LAST_SUCCESSFUL_REFRESH_EMBED_TX = 'gds_embed_tx_last_successful_refresh_v1.3.0';
+      const KEY_PAYOUT_THROTTLE_TIMESTAMPS = 'gds_embed_tx_payout_throttle_v1.3.0';
+
+      // ---- Constants ----
+      const MAX_LOG_ENTRIES_TX = 100; // Renamed
+      const REFRESH_INTERVAL_MS_TX = 10000; // Renamed
+      const GDS_TRANSFER_MODES = [ { name: 'IMPS', value: 1 }, { name: 'NEFT', value: 2 }, { name: 'RTGS', value: 3 }, ];
+      const DEFAULT_GDS_TRANSFER_MODE = 2;
+      const PAYOUT_THROTTLE_DURATION_MS = 60 * 1000;
+
+      // ---- Global Variables (Module scope) ----
+      let transactionDataCache = [];
+      let gdsAccountDataForTxModule = {}; // To store a copy of GDS accounts from accInfoModule
+      let operationLogsTx = []; // Renamed
+      let refreshIntervalIdTx = null; // Renamed
+      let columnVisibilityTx = {}; // Renamed
+      let sortConfigTx = { key: null, direction: 'asc' }; // Renamed
+      let lastSuccessfulDataTimestampTx = null; // Renamed
+      let isInitialLoadTx = true; // Renamed
+      let payoutThrottleTimestamps = {};
+      let isPanelVisible = false; // Track if this panel is active
+
+      // ---- UI Elements (Module scope) ----
+      const transactionListPanel = document.createElement('div');
+      transactionListPanel.id = 'gds-transaction-list-panel';
+      transactionListPanel.style.display = 'none'; // Initially hidden
+
+      const txControlPanel = document.createElement('div');
+      txControlPanel.id = 'embed-tx-control-panel'; // Keep original ID for styles if needed
+      txControlPanel.innerHTML = `
+        搜索: <input id="embed-tx-search" placeholder="任意内容" title="可搜索多个关键词，用空格隔开" style="padding: 2px 4px; font-size:12px;"/>
+        <button id="embed-tx-refresh" title="手动刷新交易数据" style="padding: 2px 4px; font-size:12px;">刷新交易</button>
+        <button id="embed-tx-clear-log" title="清空交易模块操作日志" style="padding: 2px 4px; font-size:12px;">清空日志</button>
+        <button id="embed-tx-clear-settings" title="清空交易模块的本地设置" style="padding: 2px 4px; font-size:12px;">重置模块</button>
+        <span id="embed-tx-last-refresh-time"></span>
+      `;
+
+      const columnTogglePanelTx = document.createElement('div'); columnTogglePanelTx.id = 'embed-tx-column-toggle-panel'; columnTogglePanelTx.className = 'gds-column-toggle-panel';
+      const tableContainerTx = document.createElement('div'); tableContainerTx.id = 'gds-tx-table-container'; tableContainerTx.className = 'gds-table-container'; tableContainerTx.innerHTML = '正在加载交易数据...';
+      const logDisplayContainerTx = document.createElement('div'); logDisplayContainerTx.id = 'embed-tx-log-container'; logDisplayContainerTx.className = 'gds-log-base'; logDisplayContainerTx.innerHTML = '<span class="log-title">交易操作日志</span>';
+
+      transactionListPanel.appendChild(txControlPanel);
+      transactionListPanel.appendChild(columnTogglePanelTx);
+      transactionListPanel.appendChild(tableContainerTx);
+      transactionListPanel.appendChild(logDisplayContainerTx);
+
+      // ---- Column Configuration ----
+      const columnConfigTx = [
+          { id: 'merchant', label: '商户', sortable: true, hideable: true, defaultVisible: true, dataKey: 'merchant', cssClass: 'col-merchant' },
+          { id: 'recipientName', label: 'Name', sortable: true, hideable: true, defaultVisible: true, dataKey: 'recipientName', cssClass: 'col-recipient-name' },
+          { id: 'recipientBank', label: 'Bank', sortable: true, hideable: true, defaultVisible: true, dataKey: 'recipientBank', cssClass: 'col-recipient-bank' },
+          { id: 'recipientAccNo', label: 'Acc No', sortable: true, hideable: false, defaultVisible: true, dataKey: 'recipientAccNo', cssClass: 'col-recipient-acc-no' },
+          { id: 'recipientIFSC', label: 'IFSC', sortable: true, hideable: true, defaultVisible: true, dataKey: 'recipientIFSC', cssClass: 'col-recipient-ifsc' },
+          { id: 'txAmount', label: '金额', sortable: true, hideable: false, defaultVisible: true, dataKey: 'txAmount', cssClass: 'col-tx-amount' },
+          { id: 'payoutAccountSelector', label: '可选打款账户', sortable: false, hideable: false, defaultVisible: true, cssClass: 'col-payout-account-selector' },
+          { id: 'payoutAccountBalance', label: '当前账户金额', sortable: false, hideable: false, defaultVisible: true, cssClass: 'col-payout-account-balance' },
+          { id: 'payeeSelector', label: '受益人', sortable: false, hideable: false, defaultVisible: true, cssClass: 'col-payee-selector' },
+          { id: 'payoutAccountLastUpdate', label: '更新时间', sortable: false, hideable: true, defaultVisible: true, cssClass: 'col-payout-account-last-update' },
+          { id: 'transferAmountInput', label: '打款金额', sortable: false, hideable: false, defaultVisible: true, cssClass: 'col-transfer-amount-input' },
+          { id: 'transferModeSelector', label: '转账模式', sortable: false, hideable: false, defaultVisible: true, cssClass: 'col-transfer-mode-selector' },
+          { id: 'actions', label: '操作', sortable: false, hideable: false, defaultVisible: true, cssClass: 'col-actions' },
+      ];
+
+      // ---- Helper Functions (Module scope) ----
+      function formatAmountTx(amount) { const num = parseFloat(amount); if (isNaN(num)) return String(amount); return num.toFixed(2).replace(/\.00$/, ''); }
+      function addLogEntryTx(logEntry) { logEntry.time = formatDateTime(new Date()); operationLogsTx.unshift(logEntry); if (operationLogsTx.length > MAX_LOG_ENTRIES_TX) operationLogsTx.pop(); localStorage.setItem(KEY_TRANSACTION_LOGS_TX, JSON.stringify(operationLogsTx)); renderLogsTx(); }
+      function renderLogsTx() { logDisplayContainerTx.innerHTML = '<span class="log-title">交易操作日志</span>'; operationLogsTx.forEach(log => { const entryDiv = document.createElement('div'); entryDiv.className = 'log-entry'; let html = `<span class="log-time">[${escapeHtml(log.time)}]</span> `; html += log.message; entryDiv.innerHTML = html; logDisplayContainerTx.appendChild(entryDiv); }); }
+      function loadColumnVisibilityTx() { const storedVisibility = JSON.parse(localStorage.getItem(KEY_COLUMN_VISIBILITY_EMBED_TX) || '{}'); columnConfigTx.forEach(col => { columnVisibilityTx[col.id] = storedVisibility[col.id] !== undefined ? storedVisibility[col.id] : col.defaultVisible; }); }
+      function saveColumnVisibilityTx() { localStorage.setItem(KEY_COLUMN_VISIBILITY_EMBED_TX, JSON.stringify(columnVisibilityTx)); }
+      function loadSortConfigTx() { const storedSortConfig = JSON.parse(localStorage.getItem(KEY_SORT_CONFIG_EMBED_TX) || '{}'); if (storedSortConfig.key && storedSortConfig.direction) { sortConfigTx = storedSortConfig; } else { sortConfigTx = { key: null, direction: 'asc' }; } }
+      function saveSortConfigTx() { localStorage.setItem(KEY_SORT_CONFIG_EMBED_TX, JSON.stringify(sortConfigTx)); }
+      function loadGdsAccountCacheForTxModule() {
+          gdsAccountDataForTxModule = accInfoModule.getAccountCache() || {}; // Get from accInfoModule
+          console.log('交易模块: GDS 账户缓存已从账户模块加载:', Object.keys(gdsAccountDataForTxModule).length, 'accounts');
+      }
+      function loadPayoutThrottleTimestamps() { payoutThrottleTimestamps = JSON.parse(localStorage.getItem(KEY_PAYOUT_THROTTLE_TIMESTAMPS) || '{}'); const now = Date.now(); Object.keys(payoutThrottleTimestamps).forEach(entryId => { if (now - payoutThrottleTimestamps[entryId] > PAYOUT_THROTTLE_DURATION_MS + 5000) { delete payoutThrottleTimestamps[entryId]; } }); localStorage.setItem(KEY_PAYOUT_THROTTLE_TIMESTAMPS, JSON.stringify(payoutThrottleTimestamps)); }
+      function setPayoutThrottle(entryId) { payoutThrottleTimestamps[entryId] = Date.now(); localStorage.setItem(KEY_PAYOUT_THROTTLE_TIMESTAMPS, JSON.stringify(payoutThrottleTimestamps)); }
+      function isPayoutThrottled(entryId) { const lastPayoutTime = payoutThrottleTimestamps[entryId]; if (!lastPayoutTime) return false; return (Date.now() - lastPayoutTime) < PAYOUT_THROTTLE_DURATION_MS; }
+      function parseBankColumnForAccountNames(bankString) { if (!bankString || typeof bankString !== 'string') return []; let cleanedString = bankString.replace(/\ball\b/gi, '').trim(); if (!cleanedString) return []; const potentialNames = cleanedString.split(/[\s,\/]+/).filter(Boolean); return potentialNames.map(name => name.trim().toUpperCase()).filter(Boolean); }
+
+      async function fetchTransactionData(isInitialFetch = false) {
+          if (!isPanelVisible && !isInitialFetch) return;
+
+          const lastRefreshTimeEl = document.getElementById('embed-tx-last-refresh-time');
+          const fetchAttemptTime = new Date();
+          if (lastRefreshTimeEl && !isInitialFetch) { lastRefreshTimeEl.innerText = `正在刷新... (${formatDateTime(fetchAttemptTime)})`; lastRefreshTimeEl.classList.remove('error'); }
+          showFetchStatus('正在从本地服务器获取交易数据...', 'info', 0);
+
+          gmFetch({ method: 'GET', url: TRANSACTION_DATA_URL, headers: { "Accept": "text/html", "Cache-Control": "no-cache", "Pragma": "no-cache" }})
+          .then(async response => {
+              if (!response.ok) throw new Error(`HTTP error ${response.status}`);
+              return response.text();
+          })
+          .then(htmlText => {
+              const parser = new DOMParser(); const doc = parser.parseFromString(htmlText, 'text/html');
+              const rows = doc.querySelectorAll('table tbody tr'); const newTransactionData = []; let hasChanged = false;
+              rows.forEach(row => {
+                  const cells = row.querySelectorAll('td');
+                  if (cells.length >= 7) {
+                      const entryId = row.dataset.entryId || `gen_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
+                      const transaction = { entryId, merchant: cells[0].textContent.trim(), recipientName: cells[1].textContent.trim(), recipientBank: cells[2].textContent.trim(), recipientAccNo: cells[3].textContent.trim(), recipientIFSC: cells[4].textContent.trim(), txAmount: parseFloat(cells[6].textContent.trim().replace(/,/g, '')) || 0, selectedPayoutAccountId: null, payoutAccountBalance: null, payoutAccountLastUpdate: null, availablePayees: [], selectedPayeeId: null, transferAmount: null, selectedTransferMode: DEFAULT_GDS_TRANSFER_MODE };
+                      const existingTx = transactionDataCache.find(t => t.entryId === transaction.entryId);
+                      if (existingTx) { Object.assign(transaction, { selectedPayoutAccountId: existingTx.selectedPayoutAccountId, payoutAccountBalance: existingTx.payoutAccountBalance, payoutAccountLastUpdate: existingTx.payoutAccountLastUpdate, availablePayees: existingTx.availablePayees || [], selectedPayeeId: existingTx.selectedPayeeId, transferAmount: existingTx.transferAmount, selectedTransferMode: existingTx.selectedTransferMode }); if (transaction.selectedPayoutAccountId && gdsAccountDataForTxModule[transaction.selectedPayoutAccountId]?.current) { const gdsAcc = gdsAccountDataForTxModule[transaction.selectedPayoutAccountId].current; transaction.payoutAccountBalance = parseFloat(gdsAcc.balance); transaction.payoutAccountLastUpdate = gdsAcc.lastChangeTime ? new Date(gdsAcc.lastChangeTime.replace(/-/g, '/')).getTime() : Date.now(); } }
+                      newTransactionData.push(transaction);
+                  }
+              });
+              if (JSON.stringify(newTransactionData.map(tx => ({...tx, availablePayees: []}))) !== JSON.stringify(transactionDataCache.map(tx => ({...tx, availablePayees: []})))) { hasChanged = true; }
+              transactionDataCache = newTransactionData;
+              if (lastRefreshTimeEl) { lastRefreshTimeEl.innerText = `数据更新于: ${formatDateTime(fetchAttemptTime)}`; lastRefreshTimeEl.classList.remove('error'); }
+              lastSuccessfulDataTimestampTx = fetchAttemptTime; localStorage.setItem(KEY_LAST_SUCCESSFUL_REFRESH_EMBED_TX, lastSuccessfulDataTimestampTx.toISOString());
+              showFetchStatus(`成功获取 ${transactionDataCache.length} 条交易数据` + (hasChanged ? " (内容有变)" : ""), 'success', 2000);
+              if (hasChanged || isInitialFetch) {
+                  renderTableTx();
+                  if (isInitialFetch) { transactionDataCache.forEach(tx => { if (tx.selectedPayoutAccountId && tx.recipientAccNo) { fetchPayeesForRow(tx.entryId, tx.recipientAccNo); } });}
+              } else { const tableRows = tableContainerTx.querySelectorAll('tbody tr'); tableRows.forEach(tableRow => { const entryId = tableRow.dataset.entryId; const txEntry = transactionDataCache.find(tx => tx.entryId === entryId); if (txEntry && txEntry.selectedPayoutAccountId) { updateRowState(tableRow, txEntry); } }); }
+          })
+          .catch(error => {
+              console.error('获取交易数据失败:', error);
+              if (lastRefreshTimeEl) { lastRefreshTimeEl.innerText = `获取失败: ${formatDateTime(fetchAttemptTime)}`; lastRefreshTimeEl.classList.add('error'); }
+              showFetchStatus(`获取交易数据失败: ${error.message}`, 'error', 5000);
+              tableContainerTx.innerHTML = `错误: 无法从 ${TRANSACTION_DATA_URL} 获取数据. ${error.message}`;
+          });
+      }
+
+      function renderColumnTogglePanelTx() {
+          let html = '列显示控制: ';
+          columnConfigTx.forEach(col => { if (col.hideable) { html += `<label title="${escapeHtml(col.label, true)}"><input type="checkbox" data-col-id="${escapeHtml(col.id)}" ${columnVisibilityTx[col.id] ? 'checked' : ''}> ${escapeHtml(col.label)}</label>`; } });
+          columnTogglePanelTx.innerHTML = html;
+      }
+      function handleColumnToggleTx(event) { const checkbox = event.target; if (checkbox.type === 'checkbox' && checkbox.dataset.colId) { const colId = checkbox.dataset.colId; columnVisibilityTx[colId] = checkbox.checked; saveColumnVisibilityTx(); renderTableTx(); } }
+      function handleHeaderClickTx(event) { const th = event.target.closest('th'); if (!th || !th.dataset.colId) return; const colId = th.dataset.colId; const col = columnConfigTx.find(c => c.id === colId); if (!col || !col.sortable) return; if (sortConfigTx.key === colId) { sortConfigTx.direction = sortConfigTx.direction === 'asc' ? 'desc' : 'asc'; } else { sortConfigTx.key = colId; sortConfigTx.direction = 'asc'; } saveSortConfigTx(); renderTableTx(); }
+
+      function renderTableTx() {
+          let headerHtml = '<thead><tr>';
+          columnConfigTx.forEach(col => { let thClass = col.cssClass || ''; if (!columnVisibilityTx[col.id] && col.hideable) thClass += ' gds-col-hidden'; if (col.sortable) thClass += ' sortable'; let sortIndicator = ''; if (col.sortable && sortConfigTx.key === col.id) { sortIndicator = sortConfigTx.direction === 'asc' ? ' ▲' : ' ▼'; } headerHtml += `<th class="${thClass}" data-col-id="${col.id}" title="${escapeHtml(col.label, true)} ${col.sortable ? '(可排序)' : ''}">${escapeHtml(col.label)}${sortIndicator}</th>`; });
+          headerHtml += '</tr></thead>';
+          const searchInput = document.getElementById('embed-tx-search');
+          const searchTerm = searchInput ? searchInput.value.toLowerCase().trim() : '';
+          const searchKeywords = searchTerm ? searchTerm.split(/\s+/).filter(k => k) : [];
+          let displayData = [...transactionDataCache];
+          if (searchKeywords.length > 0) { displayData = displayData.filter(tx => { const searchableText = `${tx.merchant} ${tx.recipientName} ${tx.recipientBank} ${tx.recipientAccNo} ${tx.recipientIFSC} ${tx.txAmount}`.toLowerCase(); return searchKeywords.every(keyword => searchableText.includes(keyword)); }); }
+          if (sortConfigTx.key) { const sortCol = columnConfigTx.find(c => c.id === sortConfigTx.key); if (sortCol && sortCol.dataKey && sortCol.sortable) { displayData.sort((a, b) => { let valA = a[sortCol.dataKey]; let valB = b[sortCol.dataKey]; if (typeof valA === 'string' && typeof valB === 'string') { valA = valA.toLowerCase(); valB = valB.toLowerCase(); } else if (typeof valA === 'number' && typeof valB === 'number') {} else { valA = String(valA).toLowerCase(); valB = String(valB).toLowerCase(); } if (valA < valB) return sortConfigTx.direction === 'asc' ? -1 : 1; if (valA > valB) return sortConfigTx.direction === 'asc' ? 1 : -1; if (a.entryId < b.entryId) return -1; if (a.entryId > b.entryId) return 1; return 0; }); } }
+          let bodyHtml = '<tbody>';
+          displayData.forEach(tx => {
+              let rowHtml = `<tr data-entry-id="${escapeHtml(tx.entryId)}">`;
+              const potentialBankAccountNames = parseBankColumnForAccountNames(tx.recipientBank);
+              const matchingGdsAccounts = Object.values(gdsAccountDataForTxModule).filter(gdsAcc => gdsAcc && gdsAcc.current && gdsAcc.current.accountName && potentialBankAccountNames.includes(gdsAcc.current.accountName.toUpperCase())).map(gdsAcc => gdsAcc.current);
+              columnConfigTx.forEach(col => {
+                  let cellClass = col.cssClass || ''; if (!columnVisibilityTx[col.id] && col.hideable) cellClass += ' gds-col-hidden'; let cellContent = '';
+                  switch (col.id) {
+                      case 'merchant': cellContent = escapeHtml(tx.merchant); break;
+                      case 'recipientName': cellContent = escapeHtml(tx.recipientName); break;
+                      case 'recipientBank': cellContent = escapeHtml(tx.recipientBank); break;
+                      case 'recipientAccNo': cellContent = escapeHtml(tx.recipientAccNo); break;
+                      case 'recipientIFSC': cellContent = escapeHtml(tx.recipientIFSC); break;
+                      case 'txAmount': cellContent = formatAmountTx(tx.txAmount); break;
+                      case 'payoutAccountSelector': let payoutAccOptionsHtml = '<option value="">--选择账户--</option>'; if (matchingGdsAccounts.length > 0) { matchingGdsAccounts.sort((a,b) => a.accountName.localeCompare(b.accountName)); matchingGdsAccounts.forEach(gdsAcc => { const accountId = gdsAcc.id || Object.keys(gdsAccountDataForTxModule).find(key => gdsAccountDataForTxModule[key].current === gdsAcc); payoutAccOptionsHtml += `<option value="${escapeHtml(accountId)}" ${tx.selectedPayoutAccountId === accountId ? 'selected' : ''}>${escapeHtml(gdsAcc.accountName)}</option>`; }); } else { payoutAccOptionsHtml += '<option value="" disabled>无匹配账户</option>'; } cellContent = `<select data-type="payout-account-selector">${payoutAccOptionsHtml}</select>`; break;
+                      case 'payoutAccountBalance': cellContent = tx.payoutAccountBalance !== null ? formatAmountTx(tx.payoutAccountBalance) : 'N/A'; break;
+                      case 'payeeSelector': let payeeOptionsHtml = '<option value="">--选择受益人--</option>'; if (tx.availablePayees && tx.availablePayees.length > 0) { tx.availablePayees.forEach(payee => { payeeOptionsHtml += `<option value="${escapeHtml(payee.payeeId)}" ${tx.selectedPayeeId == payee.payeeId ? 'selected' : ''}>${escapeHtml(payee.name)}</option>`; }); } else if (tx.selectedPayoutAccountId) { payeeOptionsHtml += '<option value="" disabled>正在加载或无受益人...</option>'; } else { payeeOptionsHtml += '<option value="" disabled>先选打款账户</option>'; } cellContent = `<select data-type="payee-selector">${payeeOptionsHtml}</select>`; break;
+                      case 'payoutAccountLastUpdate': cellContent = tx.payoutAccountLastUpdate ? formatDateTime(new Date(tx.payoutAccountLastUpdate)) : 'N/A'; break;
+                      case 'transferAmountInput': cellContent = `<input type="number" placeholder="金额" value="${tx.transferAmount !== null ? tx.transferAmount : ''}" data-type="transfer-amount-input" min="0">`; break;
+                      case 'transferModeSelector': let modeOptionsHtml = GDS_TRANSFER_MODES.map(mode => `<option value="${mode.value}" ${tx.selectedTransferMode == mode.value ? 'selected' : ''}>${escapeHtml(mode.name)}</option>`).join(''); cellContent = `<select data-type="transfer-mode-selector">${modeOptionsHtml}</select>`; break;
+                      case 'actions': const payoutAccountSelected = tx.selectedPayoutAccountId && gdsAccountDataForTxModule[tx.selectedPayoutAccountId]; const payeeSelected = tx.selectedPayeeId !== null; const transferAmountValid = tx.transferAmount !== null && tx.transferAmount > 0 && payoutAccountSelected && tx.transferAmount <= tx.payoutAccountBalance; const throttled = isPayoutThrottled(tx.entryId); cellContent = `<button class="action-button payout-action-button" data-type="payout-button" ${!(payoutAccountSelected && payeeSelected && transferAmountValid && !throttled) ? 'disabled' : ''}>${throttled ? '冷却中' : '打款'}</button>`; break;
+                      default: cellContent = `N/A (${col.id})`;
+                  }
+                  rowHtml += `<td class="${cellClass}">${cellContent}</td>`;
+              });
+              rowHtml += `</tr>`; bodyHtml += rowHtml;
+          });
+          bodyHtml += `</tbody>`; tableContainerTx.innerHTML = `<table>${headerHtml}${bodyHtml}</table>`;
+          const table = tableContainerTx.querySelector('table'); if (table) { const thead = table.querySelector('thead'); if (thead) { thead.removeEventListener('click', handleHeaderClickTx); thead.addEventListener('click', handleHeaderClickTx); } table.removeEventListener('contextmenu', handleTableRightClickTx); table.addEventListener('contextmenu', handleTableRightClickTx); table.querySelectorAll('[data-type="payout-account-selector"]').forEach(sel => sel.addEventListener('change', handlePayoutAccountChange)); table.querySelectorAll('[data-type="payee-selector"]').forEach(sel => sel.addEventListener('change', handlePayeeChange)); table.querySelectorAll('[data-type="transfer-amount-input"]').forEach(inp => inp.addEventListener('input', handleTransferAmountChange)); table.querySelectorAll('[data-type="transfer-mode-selector"]').forEach(sel => sel.addEventListener('change', handleTransferModeChange)); table.querySelectorAll('[data-type="payout-button"]').forEach(btn => btn.addEventListener('click', handlePayoutButtonClick)); }
+      }
+      function handleTableRightClickTx(event) { const td = event.target.closest('td'); if (td) { event.preventDefault(); const text = td.innerText.trim(); if (text) { copyToClipboard(text, event); } } }
+      function updateRowState(rowElement, txEntry) {
+          if (!rowElement || !txEntry) return;
+          const balanceCell = rowElement.querySelector('.col-payout-account-balance');
+          const lastUpdateCell = rowElement.querySelector('.col-payout-account-last-update');
+          const payoutButton = rowElement.querySelector('[data-type="payout-button"]');
+          const payoutAccountSelectorEl = rowElement.querySelector('[data-type="payout-account-selector"]');
+          const payeeSelectorEl = rowElement.querySelector('[data-type="payee-selector"]');
+          if (balanceCell) balanceCell.textContent = txEntry.payoutAccountBalance !== null ? formatAmountTx(txEntry.payoutAccountBalance) : 'N/A';
+          if (lastUpdateCell) lastUpdateCell.textContent = txEntry.payoutAccountLastUpdate ? formatDateTime(new Date(txEntry.payoutAccountLastUpdate)) : 'N/A';
+          if(payoutAccountSelectorEl && txEntry.selectedPayoutAccountId) { const selectedOption = payoutAccountSelectorEl.querySelector(`option[value="${txEntry.selectedPayoutAccountId}"]`); if(selectedOption && gdsAccountDataForTxModule[txEntry.selectedPayoutAccountId]?.current) { const gdsAccCurrent = gdsAccountDataForTxModule[txEntry.selectedPayoutAccountId].current; selectedOption.textContent = `${escapeHtml(gdsAccCurrent.accountName)}`; }}
+          if (payeeSelectorEl) { let payeeOptionsHtml = '<option value="">--选择受益人--</option>'; if (txEntry.availablePayees && txEntry.availablePayees.length > 0) { txEntry.availablePayees.forEach(payee => { payeeOptionsHtml += `<option value="${escapeHtml(payee.payeeId)}" ${txEntry.selectedPayeeId == payee.payeeId ? 'selected' : ''}>${escapeHtml(payee.name)}</option>`; }); } else if (txEntry.selectedPayoutAccountId && txEntry.recipientAccNo) { payeeOptionsHtml += '<option value="" disabled>正在加载或无受益人...</option>'; } else { payeeOptionsHtml += '<option value="" disabled>先选打款账户</option>'; } payeeSelectorEl.innerHTML = payeeOptionsHtml; }
+          if (payoutButton) { const payoutAccountSelected = txEntry.selectedPayoutAccountId && gdsAccountDataForTxModule[txEntry.selectedPayoutAccountId]; const payeeSelected = txEntry.selectedPayeeId !== null; const transferAmountEntered = txEntry.transferAmount !== null && parseFloat(txEntry.transferAmount) > 0; const balanceSufficient = payoutAccountSelected && transferAmountEntered && parseFloat(txEntry.transferAmount) <= txEntry.payoutAccountBalance; const throttled = isPayoutThrottled(txEntry.entryId); payoutButton.disabled = !(payoutAccountSelected && payeeSelected && transferAmountEntered && balanceSufficient && !throttled); payoutButton.textContent = throttled ? '冷却中' : '打款'; }
+      }
+      async function fetchPayeesForRow(entryId, recipientAccNo) {
+          const txEntry = transactionDataCache.find(tx => tx.entryId === entryId); if (!txEntry || !recipientAccNo) return;
+          const token = localStorage.getItem('token'); if (!token) { console.warn('GDS Token not found, cannot fetch payees.'); txEntry.availablePayees = []; updateRowState(document.querySelector(`tr[data-entry-id="${entryId}"]`), txEntry); return; }
+          const apiUrl = GDS_PAYEE_LIST_API_URL_TEMPLATE.replace('{ACCOUNT_NO}', encodeURIComponent(recipientAccNo));
+          showFetchStatus(`正在为 Entry ${entryId} (Acc: ${recipientAccNo}) 获取受益人...`, 'info', 3000);
+          gmFetch({ method: "GET", url: apiUrl, headers: { "Accept": "application/json, text/plain, */*", "Authorization": token, "Cache-Control": "no-cache", "Pragma": "no-cache" }})
+          .then(async response => {
+              if (!response.ok) throw new Error(`HTTP error ${response.status}`);
+              return response.json();
+          })
+          .then(result => {
+              if (result.code === 1 && result.data && Array.isArray(result.data.list)) {
+                  txEntry.availablePayees = result.data.list.map(p => ({ payeeId: p.payeeId, name: p.name }));
+                  if (txEntry.availablePayees.length === 1) { txEntry.selectedPayeeId = txEntry.availablePayees[0].payeeId; }
+                  else if (txEntry.selectedPayeeId && !txEntry.availablePayees.find(p => p.payeeId == txEntry.selectedPayeeId)) { txEntry.selectedPayeeId = null; }
+                  addLogEntryTx({message: `Entry ${entryId}: 成功获取 ${txEntry.availablePayees.length} 个受益人 for Acc ${recipientAccNo}`});
+              } else { txEntry.availablePayees = []; txEntry.selectedPayeeId = null; addLogEntryTx({message: `<span class="log-transfer-fail">Entry ${entryId}: 获取受益人失败 for Acc ${recipientAccNo} - ${result.msg || 'API错误'}</span>`}); }
+              updateRowState(document.querySelector(`tr[data-entry-id="${entryId}"]`), txEntry);
+          })
+          .catch(e => {
+              txEntry.availablePayees = []; txEntry.selectedPayeeId = null; console.error(`Error or network issue fetching/parsing payees for Entry ${entryId}:`, e); addLogEntryTx({message: `<span class="log-transfer-fail">Entry ${entryId}: 获取/解析受益人响应错误 for Acc ${recipientAccNo}: ${e.message}</span>`}); updateRowState(document.querySelector(`tr[data-entry-id="${entryId}"]`), txEntry);
+          });
+      }
+      function handlePayoutAccountChange(event) {
+          const selector = event.target; const entryId = selector.closest('tr').dataset.entryId; const selectedGdsAccountId = selector.value;
+          const txEntry = transactionDataCache.find(tx => tx.entryId === entryId);
+          if (txEntry) {
+              txEntry.selectedPayoutAccountId = selectedGdsAccountId; txEntry.availablePayees = []; txEntry.selectedPayeeId = null;
+              if (selectedGdsAccountId && gdsAccountDataForTxModule[selectedGdsAccountId]?.current) {
+                  const gdsAcc = gdsAccountDataForTxModule[selectedGdsAccountId].current; txEntry.payoutAccountBalance = parseFloat(gdsAcc.balance); txEntry.payoutAccountLastUpdate = gdsAcc.lastChangeTime ? new Date(gdsAcc.lastChangeTime.replace(/-/g, '/')).getTime() : Date.now();
+                  if (txEntry.recipientAccNo) { fetchPayeesForRow(entryId, txEntry.recipientAccNo); }
+              } else { txEntry.payoutAccountBalance = null; txEntry.payoutAccountLastUpdate = null; }
+              updateRowState(selector.closest('tr'), txEntry);
+          }
+      }
+      function handlePayeeChange(event) { const selector = event.target; const entryId = selector.closest('tr').dataset.entryId; const selectedPayeeId = selector.value ? parseInt(selector.value) : null; const txEntry = transactionDataCache.find(tx => tx.entryId === entryId); if (txEntry) { txEntry.selectedPayeeId = selectedPayeeId; updateRowState(selector.closest('tr'), txEntry); } }
+      function handleTransferAmountChange(event) { const input = event.target; const entryId = input.closest('tr').dataset.entryId; const txEntry = transactionDataCache.find(tx => tx.entryId === entryId); if (txEntry) { const amount = parseFloat(input.value); txEntry.transferAmount = isNaN(amount) || amount < 0 ? null : parseFloat(amount.toFixed(2)); input.value = txEntry.transferAmount !== null ? txEntry.transferAmount : ''; updateRowState(input.closest('tr'), txEntry); } }
+      function handleTransferModeChange(event) { const selector = event.target; const entryId = selector.closest('tr').dataset.entryId; const txEntry = transactionDataCache.find(tx => tx.entryId === entryId); if (txEntry) txEntry.selectedTransferMode = parseInt(selector.value); }
+      async function handlePayoutButtonClick(event) {
+          const button = event.target; const entryId = button.closest('tr').dataset.entryId;
+          const txEntry = transactionDataCache.find(tx => tx.entryId === entryId);
+          if (!txEntry || !txEntry.selectedPayoutAccountId || txEntry.selectedPayeeId === null || txEntry.transferAmount === null || txEntry.transferAmount <= 0) { showToast('请选择打款账户、受益人并输入有效的打款金额', event); return; }
+          const gdsAccount = gdsAccountDataForTxModule[txEntry.selectedPayoutAccountId]?.current; if (!gdsAccount) { showToast('选择的打款账户信息无效', event); return; }
+          if (txEntry.transferAmount > gdsAccount.balance) { showToast('打款金额不能超过当前账户余额', event); return; }
+          if (isPayoutThrottled(entryId)) { showToast('操作过于频繁，请稍后再试', event); return; }
+          const token = localStorage.getItem('token'); if (!token) { showToast('GDS Token 未找到，无法打款', event); addLogEntryTx({ message: `<span class="log-transfer-fail">打款失败 (Entry ${entryId}): 未找到GDS Token</span>` }); return; }
+          button.disabled = true; showFetchStatus(`正在为 Entry ${entryId} 打款...`, 'info', 0);
+          const requestId = `req-${Date.now()}-${Math.random().toString(36).substring(2, 10)}`;
+          const payload = { tripartiteId: gdsAccount.platform, accountName: gdsAccount.accountName, payeeId: txEntry.selectedPayeeId, amount: Math.floor(txEntry.transferAmount * 100), transferMode: txEntry.selectedTransferMode, isBulk: false, version: Date.now() };
+          const selectedPayeeName = txEntry.availablePayees.find(p => p.payeeId == txEntry.selectedPayeeId)?.name || `PayeeID ${txEntry.selectedPayeeId}`;
+          addLogEntryTx({ message: `<span class="log-transfer-attempt">尝试打款 (Entry ${entryId}): 金额 ${formatAmountTx(txEntry.transferAmount)} 从 ${gdsAccount.accountName} (ID: ${gdsAccount.id}) 到 受益人 ${selectedPayeeName} (PayeeID: ${txEntry.selectedPayeeId})，模式 ${GDS_TRANSFER_MODES.find(m=>m.value == payload.transferMode)?.name || payload.transferMode }</span>` });
+          gmFetch({ method: "POST", url: GDS_TRANSFER_API_URL, headers: { "Accept": "application/json, text/plain, */*", "Authorization": token, "Content-Type": "application/json", "X-Request-ID": requestId }, data: JSON.stringify(payload)})
+          .then(async response => {
+              if (!response.ok) throw new Error(`HTTP error ${response.status}`);
+              return response.json();
+          })
+          .then(result => {
+              if (result.code === 1) {
+                  showFetchStatus(`Entry ${entryId}: 打款成功!`, 'success', 3000); addLogEntryTx({ message: `<span class="log-transfer-success">打款成功 (Entry ${entryId}): ${result.msg || ''}</span>` });
+                  setPayoutThrottle(entryId);
+                  loadGdsAccountCacheForTxModule(); // Re-fetch/update GDS account balances after successful payout
+                  transactionDataCache.forEach(tx => { if (tx.selectedPayoutAccountId === gdsAccount.id) { const updatedGdsAcc = gdsAccountDataForTxModule[gdsAccount.id]?.current; if (updatedGdsAcc) { tx.payoutAccountBalance = parseFloat(updatedGdsAcc.balance); tx.payoutAccountLastUpdate = updatedGdsAcc.lastChangeTime ? new Date(updatedGdsAcc.lastChangeTime.replace(/-/g, '/')).getTime() : Date.now(); } } });
+                  const rowElement = document.querySelector(`tr[data-entry-id="${entryId}"]`); if(rowElement) updateRowState(rowElement, txEntry); else renderTableTx();
+              } else { showFetchStatus(`Entry ${entryId}: 打款失败 - ${result.msg || '未知错误'}`, 'error', 5000); addLogEntryTx({ message: `<span class="log-transfer-fail">打款失败 (Entry ${entryId}): ${result.msg || '未知错误'}</span>` }); button.disabled = false; }
+          })
+          .catch(e => {
+              button.disabled = false; console.error(`打款 API 请求或解析错误 (Entry ${entryId}):`, e); showFetchStatus(`Entry ${entryId}: 打款请求或响应错误 - ${e.message}`, 'error', 5000); addLogEntryTx({ message: `<span class="log-transfer-fail">打款请求或响应错误 (Entry ${entryId}): ${e.message}</span>` });
+          });
+      }
+
+      function setupEventListenersTx() {
+          const searchInput = document.getElementById('embed-tx-search');
+          if (searchInput) searchInput.addEventListener('input', renderTableTx);
+
+          const refreshButton = document.getElementById('embed-tx-refresh');
+          if (refreshButton) refreshButton.addEventListener('click', () => fetchTransactionData(true));
+
+          const clearLogButton = document.getElementById('embed-tx-clear-log');
+          if (clearLogButton) clearLogButton.addEventListener('click', (event) => { if (confirm('确定要清空交易模块操作日志吗？')) { operationLogsTx = []; localStorage.removeItem(KEY_TRANSACTION_LOGS_TX); renderLogsTx(); showToast('交易模块日志已清空', event); } });
+
+          const clearSettingsButton = document.getElementById('embed-tx-clear-settings');
+          if (clearSettingsButton) clearSettingsButton.addEventListener('click', (event) => {
+              if (confirm('警告：这将清空交易模块的本地设置（列、排序、日志、打款节流状态）！\n确定要重置交易模块吗？')) {
+                  localStorage.removeItem(KEY_TRANSACTION_LOGS_TX); localStorage.removeItem(KEY_COLUMN_VISIBILITY_EMBED_TX); localStorage.removeItem(KEY_SORT_CONFIG_EMBED_TX); localStorage.removeItem(KEY_LAST_SUCCESSFUL_REFRESH_EMBED_TX); localStorage.removeItem(KEY_PAYOUT_THROTTLE_TIMESTAMPS);
+                  operationLogsTx = []; sortConfigTx = { key: null, direction: 'asc' }; lastSuccessfulDataTimestampTx = null; payoutThrottleTimestamps = {};
+                  const lastRefreshTimeEl = document.getElementById('embed-tx-last-refresh-time'); if(lastRefreshTimeEl) { lastRefreshTimeEl.innerText = '数据未加载'; lastRefreshTimeEl.classList.remove('error'); }
+                  loadColumnVisibilityTx(); renderTableTx(); renderLogsTx(); renderColumnTogglePanelTx(); showToast('交易模块设置已重置!', event);
+                  if (isPanelVisible) fetchTransactionData(true);
+              }
+          });
+          columnTogglePanelTx.addEventListener('change', handleColumnToggleTx);
+      }
+
+      function init() {
+          mainContentArea.appendChild(transactionListPanel);
+          operationLogsTx = JSON.parse(localStorage.getItem(KEY_TRANSACTION_LOGS_TX) || '[]');
+          renderLogsTx();
+          const storedTimestamp = localStorage.getItem(KEY_LAST_SUCCESSFUL_REFRESH_EMBED_TX);
+          if (storedTimestamp) { lastSuccessfulDataTimestampTx = new Date(storedTimestamp); const el = document.getElementById('embed-tx-last-refresh-time'); if(el) el.innerText = `上次成功更新: ${formatDateTime(lastSuccessfulDataTimestampTx)}`; }
+          loadColumnVisibilityTx(); loadSortConfigTx(); loadPayoutThrottleTimestamps();
+          renderColumnTogglePanelTx();
+          setupEventListenersTx();
+      }
+
+      function startAutoRefreshTx() {
+          if (refreshIntervalIdTx) clearInterval(refreshIntervalIdTx);
+          refreshIntervalIdTx = setInterval(() => {
+              if (isPanelVisible) {
+                  fetchTransactionData();
+                  const tableRows = tableContainerTx.querySelectorAll('tbody tr');
+                  tableRows.forEach(tableRow => { const entryId = tableRow.dataset.entryId; const txEntry = transactionDataCache.find(tx => tx.entryId === entryId); if (txEntry) updateRowState(tableRow, txEntry); });
+              }
+          }, REFRESH_INTERVAL_MS_TX);
+      }
+      function stopAutoRefreshTx() { if (refreshIntervalIdTx) clearInterval(refreshIntervalIdTx); refreshIntervalIdTx = null; }
+
+      return {
+          init,
+          show: () => {
+              transactionListPanel.style.display = 'flex';
+              isPanelVisible = true;
+              loadGdsAccountCacheForTxModule(); // Ensure GDS accounts are loaded when panel becomes visible
+              if (isInitialLoadTx) { fetchTransactionData(true); isInitialLoadTx = false; }
+              else if(transactionDataCache.length === 0) { fetchTransactionData(true); } // If no data, fetch
+              else { renderTableTx(); } // Re-render with current GDS cache
+              startAutoRefreshTx();
+          },
+          hide: () => { transactionListPanel.style.display = 'none'; isPanelVisible = false; stopAutoRefreshTx(); }
+      };
+  })();
+
+
+  // ---- Main Panel Switching Logic & Initialization ----
+  function switchPanel(panelName) {
+      if (panelName === activePanel) return; // No change
+
+      const buttons = mainControlPanel.querySelectorAll('#gds-assistant-panel-toggle-buttons button');
+      buttons.forEach(btn => btn.classList.remove('active'));
+
+      if (activePanel === 'accountInfo') accInfoModule.hide();
+      else if (activePanel === 'transactionList') txListModule.hide();
+
+      activePanel = panelName;
+      const activeButton = mainControlPanel.querySelector(`button[data-panel="${panelName}"]`);
+      if (activeButton) activeButton.classList.add('active');
+
+      if (activePanel === 'accountInfo') accInfoModule.show();
+      else if (activePanel === 'transactionList') txListModule.show();
+
+      // Save active panel preference if needed (optional)
+      // localStorage.setItem('gds_assistant_active_panel', activePanel);
+  }
+
+  function initialize() {
+      console.log(`GDS 助手 (v${CURRENT_VERSION}) 启动...`);
+      loadThemePreference();
+      accInfoModule.init();
+      txListModule.init();
+
+      // Determine initial panel (e.g., from localStorage or default)
+      // const savedPanel = localStorage.getItem('gds_assistant_active_panel');
+      const initialPanel = 'accountInfo'; // Default to accountInfo
+      switchPanel(initialPanel); // Show initial panel
+
+      // Setup main control panel listeners
+      document.getElementById('gds-toggle-theme').addEventListener('click', toggleTheme);
+      mainControlPanel.querySelectorAll('#gds-assistant-panel-toggle-buttons button').forEach(button => {
+          button.addEventListener('click', (event) => {
+              switchPanel(event.target.dataset.panel);
+          });
+      });
+
+      window.addEventListener('beforeunload', () => {
+          // Stop auto-refresh for both modules if they are running
+          if (typeof accInfoModule.hide === 'function') accInfoModule.hide(); // This will call stopAutoRefresh
+          if (typeof txListModule.hide === 'function') txListModule.hide();   // This will call stopAutoRefreshTx
+      });
+  }
+
+  // Wait for DOM ready
+  if (document.readyState === 'complete' || document.readyState === 'interactive') {
+      initialize();
+  } else {
+      window.addEventListener('DOMContentLoaded', initialize);
+  }
+
+})();
