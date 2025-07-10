@@ -7,6 +7,8 @@
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_xmlhttpRequest
+// @updateURL    https://raw.githubusercontent.com/lkm888/tampermonkey/main/GDS%20账户信息增强版%20(v3.1.8.2%20-%20列排序-显隐%20+%20固定表头%20+%20主题%20+%20刷新状态明示%20+%200值修正).user.js
+// @downloadURL  https://raw.githubusercontent.com/lkm888/tampermonkey/main/GDS%20账户信息增强版%20(v3.1.8.2%20-%20列排序-显隐%20+%20固定表头%20+%20主题%20+%20刷新状态明示%20+%200值修正).user.js
 // ==/UserScript==
 
 (async function() {
