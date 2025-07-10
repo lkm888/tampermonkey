@@ -7,6 +7,8 @@
 // @match        https://admin.gdspay.xyz/payout/*
 // @grant        none
 // @run-at       document-idle
+// @updateURL    https://raw.githubusercontent.com/lkm888/tampermonkey/main/翻译.js
+// @downloadURL  https://raw.githubusercontent.com/lkm888/tampermonkey/main/翻译.js
 // ==/UserScript==
 
 (function() {
