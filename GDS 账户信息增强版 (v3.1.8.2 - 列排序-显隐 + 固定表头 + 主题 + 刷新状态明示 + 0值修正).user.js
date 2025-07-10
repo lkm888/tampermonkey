@@ -1,25 +1,53 @@
 // ==UserScript==
-// @name         GDS 账户信息增强版 (v3.1.8.2 - 列排序/显隐 + 固定表头 + 主题 + 刷新状态明示 + 0值修正)
+// @name         GDS 账户信息增强版 (v3.2.87-mod3 - 优化复选框交互)
 // @namespace    http://tampermonkey.net/
-// @version      3.1.8.2
-// @description  增加列排序、列显示/隐藏切换功能。固定表头。深色/浅色主题切换。余额按5万分档显示不同颜色, 增加来款速度估算显示, 自动划转UI优化(选择框居中,增加划转比例,触发金额与模式默认值), 划转设置变动日志, 精确API对接,详细Fetch参数,金额/100,增强日志,精确“金额最后变动”时间,消失账户仍可操作状态,排序与更新,UI优化,手动状态按钮POST操作,冻结金额增加单独日志区。明确刷新成功/失败状态。修正因API瞬时返回0值导致错误记录金额变动的问题。
-// @match        https://admin.gdspay.xyz/cc*
+// @version      3.2.87.3
+// @description  [v3.2.87-mod3]: 优化设置项中的复选框（如自动划转、自动止收、取整）交互，现在点击后会立即保存状态，无需等待失去焦点或回车。
+// @match        https://admin.gdspay.xyz/8888*
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_xmlhttpRequest
 // ==/UserScript==
 
-(function() {
+(async function() {
   'use strict';
 
-  // ---- 样式注入 ----
-  const style = document.createElement('style');
-  style.innerHTML = `
+  // --- 常量定义 ---
+  const KEYS = { RELOAD_DELAY: 'gds_pending_reload_delay_after_401_v3.2', ACCOUNT_CACHE: 'gds_account_data_cache_idb_v3.2', ACCOUNT_ORDER: 'gds_account_order_idb_v3.2', THEME_PREF: 'gds_theme_preference_v3.1.7', COLUMN_VIS: 'gds_column_visibility_v3.1.8', SORT_CONF: 'gds_sort_config_v3.1.8', LAST_REFRESH: 'gds_last_successful_refresh_v3.1.8.1' };
+  const RELOAD_DELAY_MS = 5000, RELOAD_FLAG_GRACE_MS = 10000;
+  const REFRESH_INTERVAL_MS = 7000;
+  const TOKEN_REFRESH_DELAY_MS = 3000;
+  const API_STATUS = { ENABLED: 1, CUSTOM_STOP: 2, STOP_RECEIPT: 3, DISAPPEARED: -1 };
+  const DB_NAME = 'GDS_EnhancedScriptDB', DB_VERSION = 3;
+  const STORES = { ACC_DATA: 'accountData', ACC_ORDER: 'accountOrder', OP_LOGS: 'operationLogs', FROZEN_LOGS: 'frozenLogs', SETTINGS: 'settings' };
+  const MAX_LOG_DB = 80000, MAX_FROZEN_LOG_DB = 500;
+  const MAX_LOG_MEM = 2000, MAX_FROZEN_LOG_MEM = 200;
+  const MAX_BAL_HISTORY = 40;
+  const PAYEE_OPTS = [ { name: '承兑KVB', payeeId: 110 }, { name: '承兑YES', payeeId: 804 }, { name: 'ABC代付', payeeId: 1162}, { name: 'NAMA2', payeeId: 2656}, { name: '92.7承兑主账户', payeeId: 798}, { name: 'Nammapay代付', payeeId: 803}, { name: 'MTY', payeeId: 2655} ];
+  const TRANSFER_MODE_OPTS = [ { name: 'IMPS', transferMode: 1 }, { name: 'NEFT', transferMode: 2 }, { name: 'RTGS', transferMode: 3 }, ];
+  const TRANSFER_PERCENT_OPTS = [ { name: '60%', value: 0.60 },{ name: '80%', value: 0.80 }, { name: '90%', value: 0.90 }, { name: '95%', value: 0.95 }, { name: '98%', value: 0.98 }, { name: '100%', value: 1.00 } ];
+  const DEFAULT_TRIGGER_AMT = 500000, DEFAULT_TRANSFER_MODE = 3, DEFAULT_TRANSFER_PERCENT = 0.98;
+  const DEFAULT_AUTO_STOP_AMT = 200000;
+  const THROTTLES = { AUTO_TX_SUCCESS: 120 * 1000, AUTO_TX_GLOBAL_CHECK: 2000, AUTO_TX_ATTEMPT: 60 * 1000, AUTO_STOP_ATTEMPT: 30 * 1000, AUTO_RE_ENABLE_ATTEMPT: 30 * 1000, AUTO_TX_FAIL: 30 * 1000 };
+  const AMOUNT_INPUT_DEBOUNCE_DELAY_MS = 500;
+  const RANDOM_TRANSFER_MIN_FACTOR = 0.95;
+  const RANDOM_TRANSFER_MAX_FACTOR = 0.99;
+
+  // --- 全局变量 ---
+  let accountDataCache = {}, accountOrder = [], operationLogs = [], frozenBalanceIncreaseLogs = [];
+  let refreshIntervalId = null;
+  let currentTheme = 'light', columnVisibility = {}, sortConfig = { key: 'id', direction: 'asc' };
+  let lastSuccessfulDataTimestamp = null, lastAutoTransferCheckInitiatedTime = 0;
+  let token = null; let refreshToken = null;
+  let isRefreshingToken = false; let refreshPromise = null;
+
+  // --- 样式注入 ---
+  document.head.appendChild(Object.assign(document.createElement('style'), { innerHTML: `
     :root {
       --body-bg: #fff; --text-color: #212529; --text-muted-color: #6c757d; --link-color: #007bff;
       --border-color: #ccc; --border-color-light: #ddd; --border-color-lighter: #eee; --hover-bg-light: #e6f7ff;
       --panel-bg: #f0f0f0; --panel-border: #ccc; --panel-shadow: rgba(0,0,0,0.1);
-      --input-bg: #fff; --input-border: #bbb; --input-text: #495057;
+      --input-bg: #fff; --input-border: #bbb; --input-text: #495085;
       --button-bg: #f8f8f8; --button-hover-bg: #e0e0e0; --button-border: #bbb;
       --button-active-bg: #cce5ff; --button-active-border: #007bff; --button-active-text: #004085;
       --button-disabled-opacity: 0.6; --button-disabled-bg: #eee;
@@ -30,7 +58,7 @@
       --status-enabled-color: green; --status-api-stopped-color: red; --status-api-custom-stop-color: purple;
       --status-unknown-color: orange; --status-disappeared-color: #999;
       --balance-tier-1-color: #1976D2; --balance-tier-2-color: #00796B; --balance-tier-3-color: #388E3C; --balance-tier-4-color: #F57C00;
-      --bal-high-color: red; --bal-negative-color: #28a745; --frozen-positive-color: #dc3545;
+      --bal-high-color: red; --bal-negative-color: #28a745; --frozen-positive-color: #FF4136;
       --hourly-rate-positive-color: #28a745; --hourly-rate-monday-color: purple; --hourly-rate-stagnant-color: #6c757d;
       --hourly-rate-bg: #fff; --hourly-rate-border: #ddd;
       --toast-bg: rgba(0,0,0,0.75); --toast-text: white;
@@ -66,94 +94,57 @@
     input, select, button { color: var(--input-text); background-color: var(--input-bg); border: 1px solid var(--input-border); }
     select option { background-color: var(--input-bg); color: var(--input-text); }
     body.dark-theme select option { background-color: var(--input-bg) !important; color: var(--input-text) !important; }
-
-    #gds-control-panel {
-      position: fixed; top: 10px; left:50%; transform:translateX(-50%); background: var(--panel-bg);
-      padding: 6px 10px; border:1px solid var(--panel-border); display: flex; flex-wrap: wrap;
-      gap: 8px; align-items: center; z-index:10001; font-family: monospace; font-size: 12px;
-      box-shadow: 0 2px 5px var(--panel-shadow);
-    }
+    #gds-control-panel { position: fixed; top: 10px; left:50%; transform:translateX(-50%); background: var(--panel-bg); padding: 6px 10px; border:1px solid var(--panel-border); display: flex; flex-wrap: wrap; gap: 8px; align-items: center; z-index:10001; font-family: monospace; font-size: 12px; box-shadow: 0 2px 5px var(--panel-shadow); }
     #gds-control-panel input, #gds-control-panel button { padding: 2px 4px; font-size:12px; border-radius: 3px; color: var(--text-color); }
     #gds-control-panel button:hover { background-color: var(--button-hover-bg); }
     #gds-last-refresh-time { color: var(--text-muted-color); margin-left:10px; font-style:italic; }
     #gds-last-refresh-time.error { color: var(--bal-high-color); font-weight: bold; }
-
-
-    #gds-main {
-      position: fixed; top: 55px; /* Kontrol paneli yüksekliği + boşluk */
-      left: 50%; transform: translateX(-50%); z-index: 9999;
-      font-family: monospace; font-size: 12px; width: calc(100% - 20px); max-width: 1600px;
-    }
-
-    #gds-column-toggle-panel {
-      background: var(--column-toggle-panel-bg); border: 1px solid var(--column-toggle-panel-border);
-      border-bottom: none; padding: 6px 10px; margin-bottom: 0;
-      display: flex; flex-wrap: wrap; gap: 10px; font-size: 11px;
-      box-shadow: 0 1px 3px var(--column-toggle-panel-shadow);
-    }
+    #gds-main { position: fixed; top: 55px; left: 50%; transform: translateX(-50%); z-index: 9999; font-family: monospace; font-size: 12px; width: calc(100% - 20px); max-width: 1600px; display: flex; flex-direction: column; height: calc(100vh - 55px - 230px - 10px); }
+    #gds-column-toggle-panel { background: var(--column-toggle-panel-bg); border: 1px solid var(--column-toggle-panel-border); padding: 6px 10px; display: flex; flex-wrap: wrap; gap: 10px; font-size: 11px; box-shadow: 0 1px 3px var(--column-toggle-panel-shadow); flex-shrink: 0; }
     #gds-column-toggle-panel label { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
     #gds-column-toggle-panel input[type="checkbox"] { margin:0; vertical-align: middle; }
-
-    #gds-account-info {
-      background: var(--table-bg); border:1px solid var(--table-border); padding:0; /* padding is on table cells now */
-      max-height: calc(100vh - 120px - 240px - 30px); /* main top - logs - col toggle */
-      min-height: 200px; overflow-y: auto; overflow-x: auto;
-      min-width: 800px; /* Allow table to shrink more if columns are hidden */
-      box-sizing: border-box; box-shadow: 0 2px 8px var(--panel-shadow);
-    }
+    #gds-account-info { background: var(--table-bg); border:1px solid var(--table-border); padding:0; max-height: calc(100vh - 120px - 240px - 30px); min-height: 200px; overflow-y: auto; overflow-x: auto; box-sizing: border-box; box-shadow: 0 2px 8px var(--panel-shadow); }
     #gds-account-info table { border-collapse: collapse; width:100%; table-layout: auto; }
-    #gds-account-info th, #gds-account-info td {
-      border: 1px solid var(--table-border); padding: 5px 7px;
-      text-align: left; vertical-align: middle; white-space: nowrap;
-    }
-    #gds-account-info th {
-      position: sticky; top: 0; background: var(--table-header-bg); font-weight: bold; z-index: 10;
-      color: var(--text-color); cursor: pointer; user-select: none;
-    }
+    #gds-account-info th, #gds-account-info td { border: 1px solid var(--table-border); padding: 5px 7px; text-align: left; vertical-align: middle; white-space: nowrap; }
+    #gds-account-info th { position: sticky; top: 0; background: var(--table-header-bg); font-weight: bold; z-index: 10; color: var(--text-color); cursor: pointer; user-select: none; }
     #gds-account-info th.sortable:hover { background-color: var(--button-hover-bg); }
     body.dark-theme #gds-account-info th { background: var(--table-sticky-header-bg); }
     #gds-account-info tr:nth-child(even) td { background: var(--table-row-even-bg); }
     #gds-account-info tr:hover td { background: var(--table-row-hover-bg); }
     .gds-col-hidden { display: none !important; }
-
-    .col-id { text-align: right; min-width: 50px; } .col-platform { min-width: 100px; }
+    .col-delete { text-align: center; min-width: 40px; } .col-id { text-align: right; min-width: 50px; } .col-platform { min-width: 100px; }
     .col-accountName { min-width: 120px; } .col-phone { min-width: 100px; }
     .col-balance, .col-frozenBalance { text-align: right; min-width: 100px; }
-    .col-apiStatus { text-align: center; min-width: 70px; } .col-lastChangeTime { min-width: 160px; }
+    .col-apiStatus { text-align: center; min-width: 70px; }
+    .col-remarks { min-width: 80px; width: 1%; white-space: nowrap; }
+    #gds-account-info input[type="text"].remarks-input { box-sizing: content-box; padding: 2px 4px; border: 1px solid var(--input-border); background-color: var(--input-bg); color: var(--input-text); transition: width 0.1s ease-in-out; }
+    .col-lastChangeTime { min-width: 160px; }
     .col-statusOp { text-align: center; min-width: 170px; white-space: normal;}
-    .col-autoTransferEnabled, .col-autoTransferRoundToInteger { text-align: center; min-width: 70px;}
-    .col-autoTransferTriggerAmount { text-align: right; min-width: 80px;}
-    .col-autoTransferPayeeId { min-width: 130px;} .col-autoTransferMode { min-width: 90px;}
-    .col-autoTransferPercentage { text-align: center; min-width: 90px;}
-    #gds-account-info input[type="number"].autotransfer-setting { width: 70px; text-align: right; padding: 2px 4px; box-sizing: border-box;}
+    .col-loginStatus { text-align: center; min-width: 80px; }
+    .col-failedReason { min-width: 150px; white-space: normal; }
+    .col-balanceFailed { text-align: center; min-width: 100px; }
+    .col-autoStopReceiptEnabled, .col-autoStopReceiptTriggerAmount, .col-autoTransferEnabled, .col-autoTransferRoundToInteger, .col-autoTransferTriggerAmount, .col-autoTransferMode, .col-autoTransferPercentage { text-align: center; min-width: 70px; } .col-autoTransferPayeeId { text-align: left; min-width: 100px; }
+    #gds-account-info input[type="number"].autostopreceipt-setting, #gds-account-info input[type="number"].autotransfer-setting { width: 80px; text-align: right; padding: 2px 4px; box-sizing: border-box;}
+    #gds-account-info input[type="checkbox"].autostopreceipt-setting, #gds-account-info input[type="checkbox"].autotransfer-setting { vertical-align: middle; margin: 0; }
     #gds-account-info select.autotransfer-setting { width: 100%; max-width: 120px; padding: 2px; box-sizing: border-box;}
-    #gds-account-info input[type="checkbox"].autotransfer-setting { vertical-align: middle; margin: 0; }
-
+    .delete-account-btn { padding: 2px 5px; font-size: 10px; color: var(--bal-high-color); background-color: transparent; border: 1px solid var(--bal-high-color); border-radius: 3px; cursor: pointer; }
+    .delete-account-btn:hover { background-color: var(--bal-high-color); color: var(--body-bg); }
     .status-enabled { color: var(--status-enabled-color); } .status-api-stopped { color: var(--status-api-stopped-color); font-weight: bold; }
     .status-api-custom-stop { color: var(--status-api-custom-stop-color); font-weight: bold; }
     .status-unknown { color: var(--status-unknown-color); } .status-disappeared { color: var(--status-disappeared-color); font-style: italic; }
-    .status-op-btn {
-        padding: 3px 6px; font-size: 10px; margin: 1px; border: 1px solid var(--button-border);
-        border-radius: 3px; cursor: pointer; background-color: var(--button-bg); color: var(--text-color); min-width: 45px;
-    }
+    .status-op-btn { padding: 3px 6px; font-size: 10px; margin: 1px; border: 1px solid var(--button-border); border-radius: 3px; cursor: pointer; background-color: var(--button-bg); color: var(--text-color); min-width: 45px; }
     .status-op-btn:hover { background-color: var(--button-hover-bg); border-color: var(--button-border); }
     .status-op-btn.active { background-color: var(--button-active-bg); border-color: var(--button-active-border); color: var(--button-active-text); font-weight: bold; }
     .status-op-btn[disabled] { cursor: not-allowed; opacity: var(--button-disabled-opacity); background-color: var(--button-disabled-bg); }
-
-    .balance-tier-0 {} .balance-tier-1 { color: var(--balance-tier-1-color); }
-    .balance-tier-2 { color: var(--balance-tier-2-color); } .balance-tier-3 { color: var(--balance-tier-3-color); }
-    .balance-tier-4 { color: var(--balance-tier-4-color); }
-    .bal-high { color: var(--bal-high-color) !important; font-weight: bold; }
-    .bal-negative{ color: var(--bal-negative-color) !important; font-weight: bold;}
+    .balance-tier-0 {} .balance-tier-1 { color: var(--balance-tier-1-color); } .balance-tier-2 { color: var(--balance-tier-2-color); } .balance-tier-3 { color: var(--balance-tier-3-color); } .balance-tier-4 { color: var(--balance-tier-4-color); }
+    .bal-high { color: var(--bal-high-color) !important; font-weight: bold; } .bal-negative{ color: var(--bal-negative-color) !important; font-weight: bold;}
     .frozen-positive { color: var(--frozen-positive-color); font-weight: bold; }
-
-    .gds-log-base {
-      position: fixed; left:50%; transform:translateX(-50%); background: var(--log-bg);
-      border:1px solid var(--log-border); padding:10px; overflow: auto; z-index:10000;
-      font-size:12px; font-family:monospace; width: calc(100% - 20px); max-width: 1600px;
-      box-sizing: border-box; box-shadow: 0 2px 8px var(--log-shadow); color: var(--text-color);
-    }
-    #gds-account-log-container { bottom: 230px; max-height: 220px; }
+    .login-status-ok { color: var(--status-enabled-color); }
+    .login-status-logged-out { color: var(--status-api-stopped-color); }
+    .login-status-logging-in { color: var(--status-unknown-color); }
+    .balance-failed-yes { color: var(--bal-high-color); font-weight: bold; }
+    .gds-log-base { position: fixed; left:50%; transform:translateX(-50%); background: var(--log-bg); border:1px solid var(--log-border); padding:10px; overflow: auto; z-index:10000; font-size:12px; font-family:monospace; width: calc(100% - 20px); max-width: 1600px; box-sizing: border-box; box-shadow: 0 2px 8px var(--log-shadow); color: var(--text-color); }
+    #gds-account-log-container { bottom: 230px; max-height: 200px; }
     #gds-frozen-log-container { bottom: 100px; max-height: 100px; }
     .gds-log-base .log-title { font-weight: bold; margin-bottom: 5px; display: block; }
     .gds-log-base .log-entry { margin-bottom:5px; padding-bottom: 3px; border-bottom: 1px dotted var(--log-entry-border); line-height: 1.4; }
@@ -167,226 +158,616 @@
     .log-api-op-fail { color: red; } .log-transfer-attempt { color: #DAA520; }
     .log-transfer-success { color: #008000; font-weight: bold; } .log-transfer-fail { color: #B22222; font-weight: bold; }
     .log-transfer-throttled { color: #708090; } .log-setting-change { color: #4682B4; }
-
-    #gds-hourly-rate-display {
-        margin-left: 15px; padding: 2px 6px; background-color: var(--hourly-rate-bg);
-        border: 1px solid var(--hourly-rate-border); border-radius: 3px; font-weight: normal; color: var(--text-color);
-    }
+    .log-local-delete { color: #FF8C00; font-weight: bold;}
+    .log-autorenable-attempt { color: #8A2BE2; }
+    #gds-hourly-rate-display { margin-left: 15px; padding: 2px 6px; background-color: var(--hourly-rate-bg); border: 1px solid var(--hourly-rate-border); border-radius: 3px; font-weight: normal; color: var(--text-color); }
     #gds-hourly-rate-display .rate-value { font-weight: bold; }
     #gds-hourly-rate-display .rate-positive { color: var(--hourly-rate-positive-color); }
     #gds-hourly-rate-display .rate-monday { color: var(--hourly-rate-monday-color); }
     #gds-hourly-rate-display .rate-stagnant { color: var(--hourly-rate-stagnant-color); }
-
     #copy-toast { position: fixed; background: var(--toast-bg); color: var(--toast-text); padding: 8px 12px; border-radius: 4px; z-index: 10005; opacity: 0; transition: opacity 0.3s; pointer-events: none; font-size: 13px; box-shadow: 0 1px 3px var(--panel-shadow); }
     #gds-fetch-status { position: fixed; top: 15px; right: 20px; padding: 8px 12px; border-radius: 4px; font-size: 13px; z-index: 10003; display: none; box-shadow: 0 2px 5px var(--fetch-status-shadow); }
     #gds-fetch-status.info { background-color: var(--fetch-status-info-bg); color: var(--fetch-status-info-text); }
     #gds-fetch-status.success { background-color: var(--fetch-status-success-bg); color: var(--fetch-status-success-text); border: 1px solid var(--fetch-status-success-border);}
     #gds-fetch-status.error   { background-color: var(--fetch-status-error-bg); color: var(--fetch-status-error-text); border: 1px solid var(--fetch-status-error-border);}
-  `;
-  document.head.appendChild(style);
+  `}));
 
-  // ---- 控制面板 HTML ----
-  const panel = document.createElement('div');
-  panel.id = 'gds-control-panel';
-  panel.innerHTML = `
-    搜索: <input id="gds-search" placeholder="ID/平台/账号/手机" title="可搜索多个关键词，用空格隔开"/>
-    <button id="gds-refresh" title="手动刷新数据">刷新</button>
-    <button id="gds-toggle-theme" title="切换主题">切换主题</button>
-    <button id="gds-clear-log" title="清空操作、变动及冻结增加日志">清空日志</button>
-    <button id="gds-clear-prev-data" title="清空所有本地缓存数据和脚本设置">重置脚本</button>
-    <span id="gds-last-refresh-time"></span> <span id="gds-hourly-rate-display">速度: N/A</span>
-  `;
-  document.body.appendChild(panel);
+  // --- HTML 结构注入 ---
+  document.body.insertAdjacentHTML('beforeend', `
+    <div id="gds-control-panel">
+      搜索: <input id="gds-search" placeholder="ID/平台/账号/手机/备注/失败原因/日志" title="可搜索多个关键词，用空格隔开"/>
+      <button id="gds-refresh" title="手动刷新数据">刷新</button>
+      <button id="gds-toggle-theme" title="切换主题">切换主题</button>
+      <button id="gds-clear-log" title="清空操作、变动及冻结增加日志">清空日志</button>
+      <button id="gds-export-logs" title="导出当前显示的日志数据 (操作/变动/冻结)">导出日志</button>
+      <button id="gds-clear-prev-data" title="清空所有本地缓存数据和脚本设置">重置脚本</button>
+      <span id="gds-last-refresh-time"></span> <span id="gds-hourly-rate-display">预计速度: N/A</span>
+    </div>
+    <div id="gds-main">
+      <div id="gds-column-toggle-panel"></div>
+      <div id="gds-account-info">正在加载数据...</div>
+    </div>
+    <div id="gds-account-log-container" class="gds-log-base"><span class="log-title">操作与变动日志</span></div>
+    <div id="gds-frozen-log-container" class="gds-log-base"><span class="log-title">冻结金额增加日志</span></div>
+    <div id="copy-toast"></div>
+    <span id="remarks-width-measurer" style="position:absolute; top:-9999px; left:-9999px; white-space:pre; padding: 0 4px; font-family: monospace; font-size: 12px;"></span>
+    <div id="gds-fetch-status"></div>
+  `);
 
-  // ---- 主布局容器, 列控制面板, 表格容器, 日志容器, Toast, FetchStatus ----
-  const mainElement = document.createElement('div'); mainElement.id = 'gds-main';
-  const columnTogglePanel = document.createElement('div'); columnTogglePanel.id = 'gds-column-toggle-panel';
-  const tableContainer = document.createElement('div'); tableContainer.id = 'gds-account-info'; tableContainer.innerHTML = '正在加载数据...';
-  mainElement.appendChild(columnTogglePanel); mainElement.appendChild(tableContainer); document.body.appendChild(mainElement);
-  const logDisplayContainer = document.createElement('div'); logDisplayContainer.id = 'gds-account-log-container'; logDisplayContainer.className = 'gds-log-base'; logDisplayContainer.innerHTML = '<span class="log-title">操作与变动日志</span>'; document.body.appendChild(logDisplayContainer);
-  const frozenLogDisplayContainer = document.createElement('div'); frozenLogDisplayContainer.id = 'gds-frozen-log-container'; frozenLogDisplayContainer.className = 'gds-log-base'; frozenLogDisplayContainer.innerHTML = '<span class="log-title">冻结金额增加日志</span>'; document.body.appendChild(frozenLogDisplayContainer);
-  const toast = document.createElement('div'); toast.id = 'copy-toast'; document.body.appendChild(toast);
-  const fetchStatusDiv = document.createElement('div'); fetchStatusDiv.id = 'gds-fetch-status'; document.body.appendChild(fetchStatusDiv);
+  // --- DOM 元素缓存 ---
+  const D = id => document.getElementById(id);
+  const [searchInput, lastRefreshTimeEl, hourlyRateDisplay, columnTogglePanel, tableContainer, logDisplayContainer, frozenLogDisplayContainer, toast, fetchStatusDiv] = [D('gds-search'), D('gds-last-refresh-time'), D('gds-hourly-rate-display'), D('gds-column-toggle-panel'), D('gds-account-info'), D('gds-account-log-container'), D('gds-frozen-log-container'), D('copy-toast'), D('gds-fetch-status')];
 
-  // ---- 常量定义 ----
-  const KEY_ACCOUNT_DATA_CACHE = 'gds_account_data_cache_v3.1.0'; const KEY_ACCOUNT_ORDER = 'gds_account_order_v3.1.0';
-  const KEY_LOGS = 'gds_account_logs_v3.1.0'; const KEY_FROZEN_LOGS = 'gds_frozen_logs_v3.1.5';
-  const KEY_THEME_PREFERENCE = 'gds_theme_preference_v3.1.7';
-  const KEY_COLUMN_VISIBILITY = 'gds_column_visibility_v3.1.8';
-  const KEY_SORT_CONFIG = 'gds_sort_config_v3.1.8';
-  const KEY_LAST_SUCCESSFUL_REFRESH = 'gds_last_successful_refresh_v3.1.8.1';
+  // --- IndexedDB 辅助模块 ---
+  const dbHelper = (() => {
+    let dbPromise = null;
+    const openDB = () => dbPromise || (dbPromise = new Promise((res, rej) => {
+      const req = indexedDB.open(DB_NAME, DB_VERSION);
+      req.onerror = e => (console.error("IndexedDB 错误:", req.error), rej("打开数据库错误: " + req.error));
+      req.onsuccess = e => res(e.target.result);
+      req.onupgradeneeded = e => {
+        const db = e.target.result;
+        console.log(`IndexedDB upgrading from version ${e.oldVersion} to ${e.newVersion}`);
+        Object.values(STORES).forEach(s => {
+          if (db.objectStoreNames.contains(s)) {
+            db.deleteObjectStore(s);
+          }
+          if (s === STORES.OP_LOGS || s === STORES.FROZEN_LOGS) {
+            db.createObjectStore(s, { keyPath: 'id', autoIncrement: true }).createIndex('timeIndex', 'time', { unique: false });
+          } else if (s === STORES.SETTINGS) {
+            db.createObjectStore(s, { keyPath: 'key' });
+          } else {
+            db.createObjectStore(s);
+          }
+        });
+        console.log('IndexedDB 升级完成或数据库已创建。');
+      };
+    }));
+    const getObjectStore = async (store, mode) => (await openDB()).transaction(store, mode).objectStore(store);
+    const get = async (store, key) => new Promise(async (resolve, reject) => { const req = (await getObjectStore(store, 'readonly')).get(key); req.onsuccess = () => resolve(req.result); req.onerror = () => reject(req.error); });
+    const set = async (store, keyOrObject, valueIfKey) => new Promise(async (resolve, reject) => { const req = (valueIfKey !== undefined) ? (await getObjectStore(store, 'readwrite')).put(valueIfKey, keyOrObject) : (await getObjectStore(store, 'readwrite')).put(keyOrObject); req.onsuccess = () => resolve(req.result); req.onerror = () => reject(req.error); });
+    const getAll = async (store, index = null, dir = 'next') => new Promise(async (res, rej) => {
+      const results = []; const targetStore = index ? (await getObjectStore(store, 'readonly')).index(index) : (await getObjectStore(store, 'readonly'));
+      const req = targetStore.openCursor(null, dir);
+      req.onsuccess = e => { const cursor = e.target.result; if (cursor) { results.push(cursor.value); cursor.continue(); } else res(results); };
+      req.onerror = e => rej(e.target.error);
+    });
+    const trimStore = async (store, max) => new Promise(async (resolve, reject) => {
+      const db = await openDB(); const tx = db.transaction(store, 'readwrite'); const os = tx.objectStore(store);
+      tx.oncomplete = () => resolve(); tx.onerror = e => (console.error(`trimStore for ${store} failed:`, e.target.error), reject(e.target.error)); tx.onabort = e => (console.warn(`trimStore for ${store} aborted:`, e.target.error), reject(e.target.error || '事务已中止'));
+      const countReq = os.count();
+      countReq.onsuccess = () => { if (countReq.result > max) { let numToDelete = countReq.result - max; const cursorReq = os.openCursor(null, 'next');
+        cursorReq.onsuccess = e => { const cursor = e.target.result; if (cursor && numToDelete > 0) { const delReq = os.delete(cursor.primaryKey); delReq.onsuccess = () => { numToDelete--; cursor.continue(); }; delReq.onerror = e => (console.error(`trimStore cursor delete error:`, e.target.error), tx.abort()); }};
+        cursorReq.onerror = e => (console.error(`trimStore cursor error:`, e.target.error), tx.abort());
+      } else resolve(); };
+      countReq.onerror = e => (console.error(`count request for ${store} failed:`, e.target.error), tx.abort());
+    });
+    const clear = async store => new Promise(async (resolve, reject) => {
+      const tx = (await openDB()).transaction(store, 'readwrite'); const req = tx.objectStore(store).clear();
+      tx.oncomplete = () => resolve(); tx.onerror = () => reject(tx.error || `清除 ${store} 的事务失败`); tx.onabort = () => reject(tx.error || `清除 ${store} 的事务已中止`);
+    });
+    const deleteDB = async () => { if (dbPromise) { (await dbPromise).close(); dbPromise = null; }
+      return new Promise((res, rej) => { console.log(`尝试删除 IndexedDB: ${DB_NAME}`); const req = indexedDB.deleteDatabase(DB_NAME); req.onsuccess = () => { console.log(`IndexedDB ${DB_NAME} 已成功删除。`); res(); }; req.onerror = e => { console.error(`删除数据库 ${DB_NAME} 时出错:`, e.target.error); rej(e.target.error); }; req.onblocked = () => { console.warn(`删除 ${DB_NAME} 被阻塞。请关闭使用此数据库的其他标签页。`); alert(`无法删除脚本数据库 ${DB_NAME}，因为它正被其他标签页使用。请关闭所有使用此脚本的标签页后重试。`); rej('数据库删除被阻塞。请关闭其他标签页。'); }; });
+    };
+    return { STORES, openDB, get, set, addLog: set, getAll, trimStore, clear, deleteDB };
+  })();
 
-  const MAX_LOG_ENTRIES = 250; const MAX_FROZEN_LOG_ENTRIES = 100; const MAX_ACCOUNT_BALANCE_HISTORY = 100;
-  const API_STATUS_ENABLED = 1; const API_STATUS_CUSTOM_STOP = 2; const API_STATUS_STOP_RECEIPT = 3; const SCRIPT_INTERNAL_STATUS_DISAPPEARED = -1;
-  const PAYEE_OPTIONS = [ { name: '承兑KVB', payeeId: 110 }, { name: '募捐', payeeId: 565 }, { name: '测试', payeeId: 1450}, { name: 'KOTAK中转', payeeId: 798} ];
-  const TRANSFER_MODE_OPTIONS = [ { name: 'IMPS', transferMode: 1 }, { name: 'NEFT', transferMode: 2 }, { name: 'RTGS', transferMode: 3 }, ];
-  const TRANSFER_PERCENTAGE_OPTIONS = [ { name: '80%', value: 0.80 }, { name: '90%', value: 0.90 }, { name: '95%', value: 0.95 }, { name: '98%', value: 0.98 }, { name: '100%', value: 1.00 } ];
-  const DEFAULT_TRIGGER_AMOUNT = 500000; const DEFAULT_TRANSFER_MODE = 3; /*RTGS*/ const DEFAULT_TRANSFER_PERCENTAGE = 0.98;
-  const AUTO_TRANSFER_THROTTLE_MS = 60 * 1000;
-
-  // ---- 全局变量 ----
-  let accountDataCache = {}; let accountOrder = []; let operationLogs = []; let frozenBalanceIncreaseLogs = [];
-  let refreshIntervalId = null; const REFRESH_INTERVAL_MS = 7000;
-  let currentTheme = 'light';
-  let columnVisibility = {};
-  let sortConfig = { key: 'id', direction: 'asc' };
-  let lastSuccessfulDataTimestamp = null;
-
-  // ---- 列配置 ----
+  // --- 列配置 (添加了新字段) ---
   const columnConfig = [
+    { id: 'deleteAction', label: '删', sortable: false, hideable: false, defaultVisible: true, cssClass: 'col-delete' },
     { id: 'id', label: 'ID', sortable: true, hideable: false, defaultVisible: true, dataKey: 'id', cssClass: 'col-id' },
-    { id: 'platform', label: '平台', sortable: true, hideable: true, defaultVisible: true, dataKey: 'platform', cssClass: 'col-platform' },
+    { id: 'platform', label: '平台', sortable: true, hideable: true, defaultVisible: true, dataKey: 'tripartiteId', cssClass: 'col-platform' },
     { id: 'accountName', label: '账号', sortable: true, hideable: true, defaultVisible: true, dataKey: 'accountName', cssClass: 'col-accountName' },
-    { id: 'phone', label: '手机', sortable: true, hideable: true, defaultVisible: true, dataKey: 'phone', cssClass: 'col-phone' },
+    { id: 'phone', label: '手机', sortable: true, hideable: true, defaultVisible: true, dataKey: 'otpReceiver', cssClass: 'col-phone' },
     { id: 'balance', label: '余额', sortable: true, hideable: false, defaultVisible: true, dataKey: 'balance', cssClass: 'col-balance' },
     { id: 'frozenBalance', label: '冻结', sortable: true, hideable: true, defaultVisible: true, dataKey: 'frozenBalance', cssClass: 'col-frozenBalance' },
-    { id: 'apiStatus', label: '在线状态', sortable: false, hideable: true, defaultVisible: true, dataKey: 'apiStatus', cssClass: 'col-apiStatus' },
+    { id: 'apiStatus', label: '在线状态', sortable: true, hideable: true, defaultVisible: true, dataKey: 'apiStatus', cssClass: 'col-apiStatus' },
+    { id: 'loginStatus', label: '登录状态', sortable: true, hideable: true, defaultVisible: false, dataKey: 'loginStatus', cssClass: 'col-loginStatus' },
+    { id: 'failedReason', label: '失败原因', sortable: true, hideable: true, defaultVisible: false, dataKey: 'failedReason', cssClass: 'col-failedReason' },
+    { id: 'balanceFailed', label: '余额查询失败', sortable: true, hideable: true, defaultVisible: false, dataKey: 'balanceFailed', cssClass: 'col-balanceFailed' },
+    { id: 'remarks', label: '备注', sortable: true, hideable: true, defaultVisible: true, dataKey: 'remarks', cssClass: 'col-remarks' },
     { id: 'lastChangeTime', label: '金额变动时间', sortable: true, hideable: true, defaultVisible: true, dataKey: 'lastChangeTime', cssClass: 'col-lastChangeTime' },
     { id: 'statusOp', label: '状态操作', sortable: false, hideable: true, defaultVisible: true, cssClass: 'col-statusOp' },
+    { id: 'autoStopReceiptEnabled', label: '自动止收', sortable: false, hideable: true, defaultVisible: true, cssClass: 'col-autoStopReceiptEnabled' },
+    { id: 'autoStopReceiptTriggerAmount', label: '止收触发金额', sortable: false, hideable: true, defaultVisible: true, cssClass: 'col-autoStopReceiptTriggerAmount' },
     { id: 'autoTransferEnabled', label: '自动划转', sortable: false, hideable: true, defaultVisible: true, cssClass: 'col-autoTransferEnabled' },
     { id: 'autoTransferTriggerAmount', label: '触发金额', sortable: false, hideable: true, defaultVisible: true, cssClass: 'col-autoTransferTriggerAmount' },
     { id: 'autoTransferPayeeId', label: '收款账户', sortable: false, hideable: true, defaultVisible: true, cssClass: 'col-autoTransferPayeeId' },
     { id: 'autoTransferMode', label: '划转模式', sortable: false, hideable: true, defaultVisible: true, cssClass: 'col-autoTransferMode' },
     { id: 'autoTransferPercentage', label: '划转比例', sortable: false, hideable: true, defaultVisible: true, cssClass: 'col-autoTransferPercentage' },
-    { id: 'autoTransferRoundToInteger', label: '金额取整(千)', sortable: false, hideable: true, defaultVisible: true, cssClass: 'col-autoTransferRoundToInteger' },
+    { id: 'autoTransferRoundToInteger', label: '取整', sortable: false, hideable: true, defaultVisible: true, cssClass: 'col-autoTransferRoundToInteger' },
   ];
 
+  // --- 辅助函数 ---
+  const esc = str => (typeof str !== 'string' ? (str === null || str === undefined ? '' : String(str)) : document.createElement('div').appendChild(document.createTextNode(str)).parentNode.innerHTML);
+  const showToast = (txt, x, y, dur = 1200) => { toast.innerText = txt; Object.assign(toast.style, { top: `${y}px`, left: `${x}px`, opacity: '1' }); clearTimeout(toast.timeoutId); toast.timeoutId = setTimeout(() => toast.style.opacity = '0', dur); };
+  const showFetchStatus = (msg, type = 'info', dur = 3000) => { fetchStatusDiv.textContent = msg; fetchStatusDiv.className = type; fetchStatusDiv.style.display = 'block'; clearTimeout(fetchStatusDiv.timer); if (dur > 0) fetchStatusDiv.timer = setTimeout(() => fetchStatusDiv.style.display = 'none', dur); };
+  const copyToClipboard = (txt, e) => navigator.clipboard.writeText(txt).then(() => showToast(`已复制: ${txt.length > 30 ? txt.substring(0,27)+'...' : txt}`, e.clientX + 10, e.clientY + 10)).catch(() => { const ta = Object.assign(document.createElement('textarea'), { value: txt, style: 'position:absolute;left:-9999px;' }); document.body.appendChild(ta); ta.select(); try { document.execCommand('copy'); showToast(`已复制: ${txt.length > 30 ? txt.substring(0,27)+'...' : txt}`, e.clientX + 10, e.clientY + 10); } catch (err) { showToast('复制失败', e.clientX + 10, e.clientY + 10); } document.body.removeChild(ta); });
+  const fmtAmt = amt => isNaN(parseFloat(amt)) ? String(amt) : parseFloat(amt).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const fmtCurrencyInt = amt => isNaN(parseFloat(amt)) ? String(amt) : Math.round(parseFloat(amt)).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+  const debounce = (func, delay) => { let timeout; return function(...args) { const context = this; clearTimeout(timeout); timeout = setTimeout(() => func.apply(context, args), delay); }; };
+  const fmtApiStatus = s => { switch (parseInt(s)) { case API_STATUS.ENABLED: return { text: '启用', class: 'status-enabled' }; case API_STATUS.STOP_RECEIPT: return { text: '止收', class: 'status-api-stopped' }; case API_STATUS.CUSTOM_STOP: return { text: '停止', class: 'status-api-custom-stop' }; case API_STATUS.DISAPPEARED: return { text: '已消失', class: 'status-disappeared' }; default: return { text: `未知-${s}`, class: 'status-unknown' }; } };
+  const fmtLoginStatus = s => { switch (parseInt(s)) { case 0: return { text: '未登录', class: 'login-status-logged-out' }; case 1: case 3: return { text: '登录中', class: 'login-status-logging-in' }; case 2: return { text: '登录成功', class: 'login-status-ok' }; default: return { text: `未知-${s}`, class: 'status-unknown' }; } };
+  const fmtDT = dI => { const d = dI instanceof Date ? dI : new Date(dI); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`; };
+  const fmtInt = s => { if (isNaN(s) || s < 0) return 'N/A'; if (s === 0) return '0s'; const m = Math.floor(s / 60), sec = s % 60; return `${m > 0 ? `${m}m ` : ''}${sec > 0 || m === 0 ? `${sec}s` : ''}`.trim(); };
+  const stripHtml = html => { if (typeof html !== 'string') return ''; const tmp = document.createElement("DIV"); tmp.innerHTML = html; return tmp.textContent || tmp.innerText || ""; };
 
-  // ---- 辅助函数 ----
-  function escapeHtml(str, forAttribute = false) { if (typeof str !== 'string') return str === null || str === undefined ? '' : String(str); let result = str.replace(/&/g, '&').replace(/</g, '<').replace(/>/g, '>'); if (forAttribute) result = result.replace(/"/g, '"'); return result; }
-  function showToast(text, x, y, duration = 1200) { toast.innerText = text; toast.style.top = y + 'px'; toast.style.left = x + 'px'; toast.style.opacity = '1'; if (toast.timeoutId) clearTimeout(toast.timeoutId); toast.timeoutId = setTimeout(() => toast.style.opacity = '0', duration); }
-  function showFetchStatus(message, type = 'info', duration = 3000) { fetchStatusDiv.textContent = message; fetchStatusDiv.className = ''; fetchStatusDiv.classList.add(type); fetchStatusDiv.style.display = 'block'; if (fetchStatusDiv.timer) clearTimeout(fetchStatusDiv.timer); if (duration > 0) { fetchStatusDiv.timer = setTimeout(() => { fetchStatusDiv.style.display = 'none'; }, duration); } }
-  function copyToClipboard(text, event) { const displayTxt = text.length > 30 ? text.substring(0,27)+'...' : text; navigator.clipboard.writeText(text).then(() => showToast(`已复制: ${displayTxt}`, event.clientX + 10, event.clientY + 10)).catch(() => { const ta = document.createElement('textarea'); ta.value = text; ta.style.position = 'absolute'; ta.style.left = '-9999px'; document.body.appendChild(ta); ta.select(); try { document.execCommand('copy'); showToast(`已复制: ${displayTxt}`, event.clientX + 10, event.clientY + 10); } catch (err) { showToast('复制失败', event.clientX + 10, event.clientY + 10); } document.body.removeChild(ta); }); }
-  function formatAmount(amount) { const num = parseFloat(amount); if (isNaN(num)) return String(amount); return num.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
-  function formatApiStatus(statusVal) { switch (parseInt(statusVal)) { case API_STATUS_ENABLED: return { text: '启用', class: 'status-enabled' }; case API_STATUS_STOP_RECEIPT: return { text: '止收', class: 'status-api-stopped' }; case API_STATUS_CUSTOM_STOP: return { text: '停止', class: 'status-api-custom-stop' }; case SCRIPT_INTERNAL_STATUS_DISAPPEARED: return { text: '已消失', class: 'status-disappeared' }; default: return { text: `未知-${statusVal}`, class: 'status-unknown' }; } }
-  function formatDateTime(dateInput = new Date()) { const date = (dateInput instanceof Date) ? dateInput : new Date(dateInput); const YYYY = date.getFullYear(); const MM = String(date.getMonth() + 1).padStart(2, '0'); const DD = String(date.getDate()).padStart(2, '0'); const HH = String(date.getHours()).padStart(2, '0'); const MIN = String(date.getMinutes()).padStart(2, '0'); const SS = String(date.getSeconds()).padStart(2, '0'); return `${YYYY}-${MM}-${DD} ${HH}:${MIN}:${SS}`; }
-  function formatInterval(totalSeconds) { if (isNaN(totalSeconds) || totalSeconds < 0) return 'N/A'; if (totalSeconds === 0) return '0s'; const minutes = Math.floor(totalSeconds / 60); const seconds = totalSeconds % 60; let result = ''; if (minutes > 0) { result += `${minutes}m `; } if (seconds > 0 || minutes === 0) { result += `${seconds}s`; } return result.trim(); }
+  async function _addLogEntry(logArr, dbStore, maxMem, maxDb, entryData) {
+    const newLog = { ...entryData, time: fmtDT(new Date()), id: Date.now() + Math.random() };
+    logArr.unshift(newLog); if (logArr.length > maxMem) logArr.pop();
+    try { await dbHelper.addLog(dbStore, newLog); await dbHelper.trimStore(dbStore, maxDb); } catch (e) { console.error(`保存日志到 IndexedDB (${dbStore}) 时出错:`, e); }
+    _renderLogs(dbStore === STORES.OP_LOGS ? logDisplayContainer : frozenLogDisplayContainer, logArr, dbStore === STORES.OP_LOGS ? '操作与变动日志' : '冻结金额增加日志');
+  }
 
-  function addLogEntry(logEntry) { logEntry.time = formatDateTime(new Date()); operationLogs.unshift(logEntry); if (operationLogs.length > MAX_LOG_ENTRIES) operationLogs.pop(); localStorage.setItem(KEY_LOGS, JSON.stringify(operationLogs)); renderLogs(); }
-  function renderLogs() { logDisplayContainer.innerHTML = '<span class="log-title">操作与变动日志</span>'; operationLogs.forEach(log => { const entryDiv = document.createElement('div'); entryDiv.className = 'log-entry'; let html = `<span class="log-time">[${escapeHtml(log.time)}]</span> `; if (log.accountId) { html += `<span class="log-account-id">ID:${escapeHtml(log.accountId)}</span> `; html += `<span class="log-account-name">(${escapeHtml(log.accountName || 'N/A')})</span>: `; } html += log.message; if (log.interval && log.interval !== 'N/A') { html += ` <span class="log-interval">(间隔 ${escapeHtml(log.interval)})</span>`; } entryDiv.innerHTML = html; logDisplayContainer.appendChild(entryDiv); }); }
-  function addFrozenLogEntry(logEntry) { logEntry.time = formatDateTime(new Date()); frozenBalanceIncreaseLogs.unshift(logEntry); if (frozenBalanceIncreaseLogs.length > MAX_FROZEN_LOG_ENTRIES) { frozenBalanceIncreaseLogs.pop(); } localStorage.setItem(KEY_FROZEN_LOGS, JSON.stringify(frozenBalanceIncreaseLogs)); renderFrozenLogs(); }
-  function renderFrozenLogs() { frozenLogDisplayContainer.innerHTML = '<span class="log-title">冻结金额增加日志</span>'; frozenBalanceIncreaseLogs.forEach(log => { const entryDiv = document.createElement('div'); entryDiv.className = 'log-entry'; let html = `<span class="log-time">[${escapeHtml(log.time)}]</span> `; if (log.accountId) { html += `<span class="log-account-id">ID:${escapeHtml(log.accountId)}</span> `; html += `<span class="log-account-name">(${escapeHtml(log.accountName || 'N/A')})</span>: `; } html += log.message; entryDiv.innerHTML = html; frozenLogDisplayContainer.appendChild(entryDiv); }); }
-
-  function initializeAutoTransferSettings(settings) { const s = settings || {}; return { enabled: typeof s.enabled === 'boolean' ? s.enabled : false, triggerAmount: s.triggerAmount !== undefined ? s.triggerAmount : DEFAULT_TRIGGER_AMOUNT, payeeId: s.payeeId !== undefined ? s.payeeId : '', transferMode: s.transferMode !== undefined ? s.transferMode : DEFAULT_TRANSFER_MODE, roundToInteger: typeof s.roundToInteger === 'boolean' ? s.roundToInteger : false, transferPercentage: s.transferPercentage !== undefined ? s.transferPercentage : DEFAULT_TRANSFER_PERCENTAGE }; }
-
-  function applyTheme(theme) { document.body.classList.remove('light-theme', 'dark-theme'); document.body.classList.add(theme + '-theme'); currentTheme = theme; localStorage.setItem(KEY_THEME_PREFERENCE, theme); const themeButton = document.getElementById('gds-toggle-theme'); if (themeButton) { themeButton.textContent = theme === 'dark' ? '浅色主题' : '深色主题'; } }
-  function toggleTheme() { const newTheme = currentTheme === 'light' ? 'dark' : 'light'; applyTheme(newTheme); }
-  function loadThemePreference() { const preferredTheme = localStorage.getItem(KEY_THEME_PREFERENCE) || 'light'; applyTheme(preferredTheme); }
-
-  // ---- Column Visibility & Sort Persistence ----
-  function loadColumnVisibility() {
-    const storedVisibility = JSON.parse(localStorage.getItem(KEY_COLUMN_VISIBILITY) || '{}');
-    columnConfig.forEach(col => {
-        columnVisibility[col.id] = storedVisibility[col.id] !== undefined ? storedVisibility[col.id] : col.defaultVisible;
+  function _renderLogs(container, logArr, title) {
+    container.innerHTML = `<span class="log-title">${title}</span>`; const searchTerms = searchInput.value.toLowerCase().trim().split(/\s+/).filter(k => k);
+    logArr.forEach(log => {
+      const searchableText = `${log.time || ''} ${log.accountId || ''} ${log.accountName || ''} ${stripHtml(log.message || '')}`.toLowerCase();
+      if (searchTerms.length > 0 && !searchTerms.every(k => searchableText.includes(k))) return;
+      const entryDiv = document.createElement('div'); entryDiv.className = 'log-entry';
+      let html = `<span class="log-time">[${esc(log.time)}]</span> `;
+      if (log.accountId) html += `<span class="log-account-id">ID:${esc(log.accountId)}</span> <span class="log-account-name">(${esc(log.accountName || 'N/A')})</span>: `;
+      html += log.message; if (log.interval && log.interval !== 'N/A') html += ` <span class="log-interval">(间隔 ${esc(log.interval)})</span>`;
+      entryDiv.innerHTML = html; container.appendChild(entryDiv);
     });
   }
-  function saveColumnVisibility() { localStorage.setItem(KEY_COLUMN_VISIBILITY, JSON.stringify(columnVisibility)); }
-  function loadSortConfig() {
-    const storedSortConfig = JSON.parse(localStorage.getItem(KEY_SORT_CONFIG) || '{}');
-    if (storedSortConfig.key && storedSortConfig.direction) {
-        sortConfig = storedSortConfig;
-    }
-  }
-  function saveSortConfig() { localStorage.setItem(KEY_SORT_CONFIG, JSON.stringify(sortConfig)); }
 
+  const initAutoTxSettings = s => ({ enabled: typeof s?.enabled === 'boolean' ? s.enabled : false, triggerAmount: s?.triggerAmount !== undefined ? s.triggerAmount : DEFAULT_TRIGGER_AMT, payeeId: s?.payeeId !== undefined ? s.payeeId : '', transferMode: s?.transferMode !== undefined ? s.transferMode : DEFAULT_TRANSFER_MODE, roundToInteger: typeof s?.roundToInteger === 'boolean' ? s.roundToInteger : false, transferPercentage: s?.transferPercentage !== undefined ? s.transferPercentage : DEFAULT_TRANSFER_PERCENT });
+  const initAutoStopSettings = s => ({ enabled: typeof s?.enabled === 'boolean' ? s.enabled : false, triggerAmount: s?.triggerAmount !== undefined ? s.triggerAmount : DEFAULT_AUTO_STOP_AMT });
 
-  function loadPersistedData() {
-    const storedCache = JSON.parse(localStorage.getItem(KEY_ACCOUNT_DATA_CACHE) || '{}');
-    for (const accId in storedCache) { storedCache[accId].autoTransferSettings = initializeAutoTransferSettings(storedCache[accId].autoTransferSettings); if (storedCache[accId].lastSuccessfulTransferTime === undefined) { storedCache[accId].lastSuccessfulTransferTime = 0; } if(!storedCache[accId].current) storedCache[accId].current = {}; if(!storedCache[accId].current.balanceHistory) { storedCache[accId].current.balanceHistory = []; } }
-    accountDataCache = storedCache;
-    accountOrder = JSON.parse(localStorage.getItem(KEY_ACCOUNT_ORDER) || '[]');
-    operationLogs = JSON.parse(localStorage.getItem(KEY_LOGS) || '[]');
-    frozenBalanceIncreaseLogs = JSON.parse(localStorage.getItem(KEY_FROZEN_LOGS) || '[]');
-    const storedTimestamp = localStorage.getItem(KEY_LAST_SUCCESSFUL_REFRESH);
-    if (storedTimestamp) {
-        lastSuccessfulDataTimestamp = new Date(storedTimestamp);
-        const lastRefreshTimeEl = document.getElementById('gds-last-refresh-time');
-        if(lastRefreshTimeEl) lastRefreshTimeEl.innerText = `上次成功更新: ${formatDateTime(lastSuccessfulDataTimestamp)}`;
-    }
-    loadColumnVisibility(); loadSortConfig();
-    renderLogs(); renderFrozenLogs(); renderColumnTogglePanel();
+  const loadSetting = async (key, defaultVal) => { try { const s = await dbHelper.get(dbHelper.STORES.SETTINGS, key); return s ? s.value : defaultVal; } catch (e) { console.error(`从 IndexedDB 加载 ${key} 时出错:`, e); return defaultVal; } };
+  const saveSetting = async (key, value) => { try { await dbHelper.set(dbHelper.STORES.SETTINGS, { key, value }); } catch (e) { console.error(`保存 ${key} 到 IndexedDB 时出错:`, e); } };
+
+  const applyTheme = t => { document.body.className = `${t}-theme`; currentTheme = t; saveSetting(KEYS.THEME_PREF, t); D('gds-toggle-theme').textContent = t === 'dark' ? '浅色主题' : '深色主题'; };
+  const toggleTheme = () => applyTheme(currentTheme === 'light' ? 'dark' : 'light');
+
+  function parseGmHeaders(headerStr) {
+      const headers = new Headers(); if (!headerStr) return headers;
+      headerStr.split('\r\n').forEach(headerPair => { const index = headerPair.indexOf(': '); if (index > 0) { const key = headerPair.substring(0, index); const value = headerPair.substring(index + 2); try { headers.append(key, value); } catch(e) { console.warn(`无法添加 Header: ${key}: ${value}`, e); } } });
+      return headers;
   }
 
-  function calculateEstimatedHourlyRate(accountCache) { const nowTs = Date.now(); let totalIncreaseInLast10Min = 0; let contributingAccountsCount = 0; const tenMinutesAgoTs = nowTs - (10 * 60 * 1000); for (const accountId in accountCache) { const cacheEntry = accountCache[accountId]; if (!cacheEntry || !cacheEntry.current || cacheEntry.current.isDisappeared) continue; const accData = cacheEntry.current; const currentBalance = accData.balance; if (typeof currentBalance !== 'number' || !accData.balanceHistory || accData.balanceHistory.length === 0) continue; let balanceAtApprox10MinAgo = null; for (let i = accData.balanceHistory.length - 1; i >= 0; i--) { const historyEntry = accData.balanceHistory[i]; if (historyEntry.timestamp <= tenMinutesAgoTs) { balanceAtApprox10MinAgo = historyEntry.balance; break; } } if (balanceAtApprox10MinAgo === null && accData.balanceHistory.length > 0) { const oldestEntryInHistory = accData.balanceHistory[0]; if (oldestEntryInHistory.timestamp > tenMinutesAgoTs) balanceAtApprox10MinAgo = oldestEntryInHistory.balance; } if (balanceAtApprox10MinAgo !== null && typeof balanceAtApprox10MinAgo === 'number' && currentBalance > balanceAtApprox10MinAgo) { totalIncreaseInLast10Min += (currentBalance - balanceAtApprox10MinAgo); contributingAccountsCount++; } } if (contributingAccountsCount === 0) return `速度: <span class="rate-stagnant">N/A (近10分钟无增)</span>`; const estimatedHourly = totalIncreaseInLast10Min * 6; const today = new Date(nowTs); const isMonday = today.getDay() === 1; let rateClass = "rate-positive"; let prefix = "速度"; if (isMonday) { rateClass = "rate-monday"; prefix = "预计速度"; } return `${prefix}: <span class="${rateClass}"><span class="rate-value">+${formatAmount(estimatedHourly)}</span>/小时</span> <small>(${contributingAccountsCount}个账户)</small>`; }
+  const gmRequest = details => new Promise((res, rej) => {
+    GM_xmlhttpRequest({
+      method: details.method || "GET", url: details.url, headers: details.headers || {}, data: details.data, responseType: details.responseType, timeout: details.timeout || 15000,
+      onload: r => res({ status: r.status, ok: r.status >= 200 && r.status < 300, headers: parseGmHeaders(r.responseHeaders), json: () => r.responseType === 'json' ? r.response : JSON.parse(r.responseText), text: () => r.responseText, rawJson: r.response, rawText: r.responseText }),
+      onerror: r => (console.error("GM_xmlhttpRequest 错误:", r), rej(new Error(`网络错误: ${r.error || r.statusText || '未知 GM_xmlhttpRequest 错误'}`))),
+      ontimeout: () => (console.error("GM_xmlhttpRequest 超时，URL:", details.url), rej(new Error('请求超时'))),
+      onabort: () => (console.error("GM_xmlhttpRequest 已中止，URL:", details.url), rej(new Error('请求已中止')))
+    });
+  });
 
-  async function fetchAccountData(isInitialLoad = false) {
-    const token = localStorage.getItem('token');
-    const lastRefreshTimeEl = document.getElementById('gds-last-refresh-time');
-    const fetchAttemptTime = new Date();
+  async function refreshAuthTokens() {
+      if (isRefreshingToken) return refreshPromise;
+      isRefreshingToken = true;
+      refreshPromise = (async () => {
+          refreshToken = localStorage.getItem('refreshToken');
+          if (!refreshToken) { console.error("GDS 脚本: 刷新Token缺失，无法刷新。"); showFetchStatus('刷新Token缺失。请重新登录。', 'error', 0); return false; }
+          showFetchStatus('Token已过期，尝试刷新Token...', 'info', 0);
+          try {
+              const res = await gmRequest({ method: "GET", url: "https://admin.gdspay.xyz/api/auth/v1/refresh", headers: { "authorization": refreshToken, "accept": "application/json, text/plain, */*", "accept-language": "zh-CN,zh;q=0.9,en;q=0.8", "cache-control": "no-cache", "pragma": "no-cache", "sec-fetch-dest": "empty", "sec-fetch-mode": "cors", "sec-fetch-site": "same-origin" }, responseType: "json" });
+              if (res.ok && res.rawJson?.code === 1) {
+                  const { token: newAccessToken, refreshToken: newRefreshToken } = res.rawJson.data;
+                  if (newAccessToken && newRefreshToken) { localStorage.setItem('token', newAccessToken); localStorage.setItem('refreshToken', newRefreshToken); token = newAccessToken; refreshToken = newRefreshToken; showFetchStatus('Token刷新成功!', 'success', 2000); console.log("GDS 脚本: Token刷新成功。"); return true; }
+                  else { console.error("GDS 脚本: 刷新Token响应中缺少新的Token或刷新Token。", res.rawJson); showFetchStatus('刷新Token失败：响应数据不完整。', 'error', 4000); return false; }
+              } else { const errMsg = res.rawJson?.msg || res.error || res.rawText || `状态码: ${res.status}`; console.error(`GDS 脚本: 刷新Token失败: ${errMsg}`); showFetchStatus(`刷新Token失败: ${errMsg}`, 'error', 4000); return false; }
+          } catch (e) { console.error("GDS 脚本: 刷新Token请求异常:", e); showFetchStatus(`刷新Token请求异常: ${e.message}`, 'error', 4000); return false; }
+          finally { isRefreshingToken = false; refreshPromise = null; }
+      })();
+      return refreshPromise;
+  }
 
-    if (!token) {
-      showFetchStatus('未找到Token。请登录。脚本暂停。', 'error', 0);
-      if (refreshIntervalId) clearInterval(refreshIntervalId);
-      tableContainer.innerHTML = '错误：未找到登录 Token。请登录后刷新页面。';
-      if (lastRefreshTimeEl) {
-          lastRefreshTimeEl.innerText = `获取Token失败于: ${formatDateTime(fetchAttemptTime)}`;
-          lastRefreshTimeEl.classList.add('error');
+  async function apiRequest(details, retryCount = 0) {
+      token = localStorage.getItem('token');
+      if (!token) return { ok: false, status: 401, error: 'Token missing', rawText: 'Token缺失' };
+
+      try {
+          const res = await gmRequest({ ...details, headers: { ...details.headers, "authorization": token } });
+          if (res.status === 401 && retryCount === 0) {
+              console.warn('GDS 脚本: 收到 401 未授权错误，尝试刷新Token...');
+              const refreshSuccess = await refreshAuthTokens();
+              if (refreshSuccess) {
+                  console.log(`GDS 脚本: Token刷新成功，等待 ${TOKEN_REFRESH_DELAY_MS / 1000} 秒后重试原API请求。`);
+                  showFetchStatus(`Token刷新成功，等待 ${TOKEN_REFRESH_DELAY_MS / 1000} 秒后重试...`, 'info', TOKEN_REFRESH_DELAY_MS + 500);
+                  await new Promise(res => setTimeout(res, TOKEN_REFRESH_DELAY_MS));
+                  console.log('GDS 脚本: 延迟结束，正在重试原API请求。');
+                  return await apiRequest(details, 1);
+              } else { console.error('GDS 脚本: Token刷新失败，无法重试原请求。'); showFetchStatus('Token刷新失败，无法重试原请求。请重新登录。', 'error', 0); throw new Error('Token刷新失败，无法重试原请求。'); }
+          }
+          return res;
+      } catch (error) {
+          if (error.message === 'Token刷新失败，无法重试原请求。') throw error;
+          console.error('API请求异常:', error); showFetchStatus(`API请求异常: ${error.message}`, 'error', 4000);
+          return { ok: false, error: error.message };
       }
-      return;
-    }
+  }
 
-    if (lastRefreshTimeEl && !isInitialLoad) {
-        lastRefreshTimeEl.innerText = `正在刷新... (${formatDateTime(fetchAttemptTime)})`;
-        lastRefreshTimeEl.classList.remove('error');
+  async function _setAccountApiStatus(accId, newStatus, srcAction = "手动操作") {
+    const accCache = accountDataCache[accId];
+    if (!accCache?.current) { _addLogEntry(operationLogs, STORES.OP_LOGS, MAX_LOG_MEM, MAX_LOG_DB, { accountId: accId, message: `${srcAction}: 设置状态为 "${fmtApiStatus(newStatus).text}" <span class="log-api-op-fail">(失败: 账户数据缺失)</span>` }); return false; }
+    const { accountName, platform: tripartiteId, apiStatus: oldStatus } = accCache.current;
+    if (oldStatus === newStatus && srcAction === "手动操作") { showToast('状态未改变', window.innerWidth / 2, window.innerHeight / 2, 800); return true; }
+    if (oldStatus === newStatus) return true;
+    showFetchStatus(`ID ${accId} (${srcAction}): 设置状态为 "${fmtApiStatus(newStatus).text}"...`, 'info', 0);
+    try {
+      const res = await apiRequest({ method: "POST", url: "https://admin.gdspay.xyz/api/tripartite/v1/account/status/modify", headers: { "content-type": "application/json" }, data: JSON.stringify({ accountId: parseInt(accId), accountName, tripartiteId, accountStatus: newStatus }), responseType: "json" });
+      const r = res.rawJson;
+      if (res.ok && r?.code === 1) {
+        showFetchStatus(`ID ${accId} (${srcAction}): 状态设置成功!`, 'success', 2500); accCache.current.apiStatus = newStatus;
+        if (srcAction === "自动止收" && newStatus === API_STATUS.STOP_RECEIPT) accCache.isAutoStoppedByScript = true;
+        else if (newStatus === API_STATUS.ENABLED || newStatus === API_STATUS.CUSTOM_STOP) accCache.isAutoStoppedByScript = false;
+        await saveAccountDataToDB(); renderTable();
+        _addLogEntry(operationLogs, STORES.OP_LOGS, MAX_LOG_MEM, MAX_LOG_DB, { accountId: accId, accountName, message: `${srcAction}: 在线状态从 ${fmtApiStatus(oldStatus).text} → <span class="log-status-change">${fmtApiStatus(newStatus).text}</span> <span class="log-api-op-success">(成功)</span>` }); return true;
+      } else { const errMsg = r ? r.msg : (res.rawText || '未知错误'); showFetchStatus(`ID ${accId} (${srcAction}): 状态设置失败 - ${errMsg}`, 'error', 4000); _addLogEntry(operationLogs, STORES.OP_LOGS, MAX_LOG_MEM, MAX_LOG_DB, { accountId: accId, accountName, message: `${srcAction}: 在线状态从 ${fmtApiStatus(oldStatus).text} → ${fmtApiStatus(newStatus).text} <span class="log-api-op-fail">(失败: ${esc(errMsg)})</span>` }); return false; }
+    } catch (e) { console.error(`${srcAction} - 设置状态API请求错误 (ID ${accId}):`, e); showFetchStatus(`ID ${accId} (${srcAction}): 状态设置请求异常 - ${e.message}`, 'error', 4000); _addLogEntry(operationLogs, STORES.OP_LOGS, MAX_LOG_MEM, MAX_LOG_DB, { accountId: accId, accountName, message: `${srcAction}: 在线状态从 ${fmtApiStatus(oldStatus).text} → ${fmtApiStatus(newStatus).text} <span class="log-api-op-fail">(请求异常: ${esc(e.message)})</span>` }); return false; }
+  }
+
+  async function checkAndPerformAutoStopReceipt(specificAccId = null) {
+    const accs = specificAccId ? [specificAccId] : Object.keys(accountDataCache);
+    for (const accId of accs) {
+      const c = accountDataCache[accId]; if (!c?.current || !c.autoStopReceiptSettings?.enabled || c.current.isDisappeared) continue;
+      const { current: acc, autoStopReceiptSettings: s } = c;
+      const trigAmt = parseFloat(s.triggerAmount); if (isNaN(trigAmt) || trigAmt <= 0) continue;
+      if (acc.balance > trigAmt && acc.apiStatus === API_STATUS.ENABLED) {
+        const now = Date.now(); if (c.lastAutoStopAttempt && (now - c.lastAutoStopAttempt < THROTTLES.AUTO_STOP_ATTEMPT)) continue;
+        c.lastAutoStopAttempt = now;
+        _addLogEntry(operationLogs, STORES.OP_LOGS, MAX_LOG_MEM, MAX_LOG_DB, { accountId: accId, accountName: acc.accountName, message: `<span class="log-transfer-attempt">自动止收触发: 余额 ${fmtAmt(acc.balance)} > ${fmtAmt(trigAmt)}. 尝试设置状态为 "止收".</span>` });
+        const success = await _setAccountApiStatus(accId, API_STATUS.STOP_RECEIPT, "自动止收");
+        if (success) delete c.lastAutoStopAttempt; await saveAccountDataToDB();
+      }
     }
+  }
+
+  async function checkAndPerformAutoReEnable(specificAccId = null) {
+    const accs = specificAccId ? [specificAccId] : Object.keys(accountDataCache);
+    for (const accId of accs) {
+      const c = accountDataCache[accId]; if (!c?.current || !c.autoStopReceiptSettings?.enabled || c.current.isDisappeared) continue;
+      const { current: acc, autoStopReceiptSettings: s } = c;
+      const trigAmt = parseFloat(s.triggerAmount); if (isNaN(trigAmt) || trigAmt <= 0) continue;
+      if (acc.apiStatus === API_STATUS.STOP_RECEIPT && c.isAutoStoppedByScript && acc.balance < trigAmt) {
+        const now = Date.now(); if (c.lastAutoReEnableAttempt && (now - c.lastAutoReEnableAttempt < THROTTLES.AUTO_RE_ENABLE_ATTEMPT)) continue;
+        c.lastAutoReEnableAttempt = now;
+        _addLogEntry(operationLogs, STORES.OP_LOGS, MAX_LOG_MEM, MAX_LOG_DB, { accountId: accId, accountName: acc.accountName, message: `<span class="log-autorenable-attempt">自动解除止收触发: 余额 ${fmtAmt(acc.balance)} < ${fmtAmt(trigAmt)}. 尝试设置状态为 "启用".</span>` });
+        const success = await _setAccountApiStatus(accId, API_STATUS.ENABLED, "自动解除止收");
+        if (success) delete c.lastAutoReEnableAttempt; await saveAccountDataToDB();
+      }
+    }
+  }
+
+async function checkAndPerformAutoTransfers(specificAccId = null) {
+  const nowGlobal = Date.now();
+  if (!specificAccId && (nowGlobal - lastAutoTransferCheckInitiatedTime < THROTTLES.AUTO_TX_GLOBAL_CHECK)) return;
+  if (!specificAccId) lastAutoTransferCheckInitiatedTime = nowGlobal;
+
+  for (const accId of specificAccId ? [specificAccId] : Object.keys(accountDataCache)) {
+    const c = accountDataCache[accId];
+    if (!c?.current || !c.autoTransferSettings?.enabled || c.current.isDisappeared || ![API_STATUS.ENABLED, API_STATUS.STOP_RECEIPT].includes(c.current.apiStatus)) continue;
+
+    const { current: acc, autoTransferSettings: s } = c;
+    const nowPerAcc = Date.now();
+
+    if ((c.lastSuccessfulTransferTime && (nowPerAcc - c.lastSuccessfulTransferTime < THROTTLES.AUTO_TX_SUCCESS)) || (c.lastFailedTransferTime && (nowPerAcc - c.lastFailedTransferTime < THROTTLES.AUTO_TX_FAIL)) || (c.lastTransferAttemptTime && (nowPerAcc - c.lastTransferAttemptTime < THROTTLES.AUTO_TX_ATTEMPT))) continue;
+
+    const trigAmt = parseFloat(s.triggerAmount);
+    if (isNaN(trigAmt) || trigAmt <= 0 || acc.balance < trigAmt) continue;
+
+    if (!s.payeeId || !s.transferMode) { _addLogEntry(operationLogs, STORES.OP_LOGS, MAX_LOG_MEM, MAX_LOG_DB, { accountId: accId, accountName: acc.accountName, message: `<span class="log-transfer-fail">自动划转配置不完整 (收款账户或模式未选)</span>` }); continue; }
+
+    const txPerc = parseFloat(s.transferPercentage);
+    if (isNaN(txPerc) || txPerc <= 0 || txPerc > 1) { _addLogEntry(operationLogs, STORES.OP_LOGS, MAX_LOG_MEM, MAX_LOG_DB, { accountId: accId, accountName: acc.accountName, message: `<span class="log-transfer-fail">自动划转失败: 无效的划转比例 (${esc(String(s.transferPercentage))})</span>` }); continue; }
+
+    const baseAmountFromSettings = acc.balance * txPerc;
+    let finalTransferAmountYuan = Math.round(baseAmountFromSettings * (Math.random() * (RANDOM_TRANSFER_MAX_FACTOR - RANDOM_TRANSFER_MIN_FACTOR) + RANDOM_TRANSFER_MIN_FACTOR));
+    if (s.roundToInteger) finalTransferAmountYuan = Math.floor(finalTransferAmountYuan / 100) * 100;
+    const amtInCents = Math.floor(finalTransferAmountYuan * 100);
+
+    if (amtInCents <= 0) { _addLogEntry(operationLogs, STORES.OP_LOGS, MAX_LOG_MEM, MAX_LOG_DB, { accountId: accId, accountName: acc.accountName, message: `<span class="log-transfer-fail">计算后划转金额为0或负数 (${fmtAmt(amtInCents/100)})，不执行</span>` }); continue; }
+
+    const reqId = `req-${Date.now()}-${Math.random().toString(36).substring(2, 10)}`;
+    const payload = { tripartiteId: acc.platform, accountName: acc.accountName, payeeId: parseInt(s.payeeId), amount: amtInCents, transferMode: parseInt(s.transferMode), isBulk: false, version: Date.now() };
+    const payeeName = PAYEE_OPTS.find(p => p.payeeId === payload.payeeId)?.name || `PayeeID ${payload.payeeId}`;
+    const modeName = TRANSFER_MODE_OPTS.find(m => m.transferMode === payload.transferMode)?.name || `Mode ${payload.transferMode}`;
+
+    c.lastTransferAttemptTime = nowPerAcc;
+    delete c.lastSuccessfulTransferTime; delete c.lastFailedTransferTime;
+    await saveAccountDataToDB();
+
+    const commonLogMsg = `自动划转 ${fmtAmt(amtInCents / 100)} (随机金额: ${fmtCurrencyInt(finalTransferAmountYuan)} 元，原预计 ${fmtAmt(baseAmountFromSettings)}) 到 ${esc(payeeName)} (模式: ${esc(modeName)})`;
+    _addLogEntry(operationLogs, STORES.OP_LOGS, MAX_LOG_MEM, MAX_LOG_DB, { accountId: accId, accountName: acc.accountName, message: `<span class="log-transfer-attempt">${commonLogMsg}</span>` });
+    showFetchStatus(`ID ${accId}: 尝试自动划转 ${fmtAmt(amtInCents / 100)}...`, 'info', 5000);
 
     try {
-      const response = await fetch("https://admin.gdspay.xyz/api/tripartite/v1/account/view", { "headers": { "accept": "application/json, text/plain, */*", "accept-language": "zh-CN,zh;q=0.9,en;q=0.8", "authorization": token, "cache-control": "no-cache", "pragma": "no-cache", "sec-fetch-dest": "empty", "sec-fetch-mode": "cors", "sec-fetch-site": "same-origin" }, "referrer": "https://admin.gdspay.xyz/tripartite", "referrerPolicy": "strict-origin-when-cross-origin", "body": null, "method": "GET", "mode": "cors", "credentials": "include" });
+      const res = await apiRequest({ method: "POST", url: "https://admin.gdspay.xyz/api/tripartite/v1/transfer/manual", headers: { "content-type": "application/json", "X-Request-ID": reqId }, data: JSON.stringify(payload), responseType: "json" });
+      const r = res.rawJson;
+      if (res.ok && r?.code === 1) { c.lastSuccessfulTransferTime = Date.now(); _addLogEntry(operationLogs, STORES.OP_LOGS, MAX_LOG_MEM, MAX_LOG_DB, { accountId: accId, accountName: acc.accountName, message: `<span class="log-transfer-success">${commonLogMsg} 成功!</span>` }); showFetchStatus(`ID ${accId}: 自动划转成功!`, 'success', 3000); }
+      else { c.lastFailedTransferTime = Date.now(); const errMsg = r ? r.msg : (res.rawText || '未知错误'); _addLogEntry(operationLogs, STORES.OP_LOGS, MAX_LOG_MEM, MAX_LOG_DB, { accountId: accId, accountName: acc.accountName, message: `<span class="log-transfer-fail">${commonLogMsg} 失败: ${esc(errMsg)}</span>` }); showFetchStatus(`ID ${accId}: 自动划转失败 - ${errMsg}`, 'error', 5000); }
+    } catch (e) {
+      c.lastFailedTransferTime = Date.now(); console.error(`ID ${accId}: 自动划转 API 请求错误:`, e); _addLogEntry(operationLogs, STORES.OP_LOGS, MAX_LOG_MEM, MAX_LOG_DB, { accountId: accId, accountName: acc.accountName, message: `<span class="log-transfer-fail">${commonLogMsg} 请求异常: ${esc(e.message)}</span>` }); showFetchStatus(`ID ${accId}: 自动划转请求异常`, 'error', 5000);
+    } finally {
+      delete c.lastTransferAttemptTime; await saveAccountDataToDB();
+    }
+  }
+}
 
-      if (response.status === 401) {
-        console.warn('GDS Script: 收到 401 未授权错误，立即刷新页面。');
-        if (refreshIntervalId) clearInterval(refreshIntervalId);
-        showFetchStatus('登录已过期或Token无效，正在刷新...', 'error', 0);
-        if (lastRefreshTimeEl) {
-            lastRefreshTimeEl.innerText = `授权失败于: ${formatDateTime(fetchAttemptTime)}. ${lastSuccessfulDataTimestamp ? '旧数据截至: ' + formatDateTime(lastSuccessfulDataTimestamp) : ''}`;
-            lastRefreshTimeEl.classList.add('error');
+  function calculateEstimatedHourlyRate(accCache) {
+    const nowTs = Date.now();
+    const tenMinAgoTs = nowTs - (10 * 60 * 1000);
+    const totalIncrease = Object.values(accCache).reduce((overallAcc, c) => {
+        if (!c?.current || c.current.isDisappeared) return overallAcc;
+        const history = c.current.balanceHistory;
+        if (!Array.isArray(history) || history.length < 2) return overallAcc;
+        const recentHistory = history
+            .filter(h => h.timestamp >= tenMinAgoTs && typeof h.balance === 'number')
+            .sort((a, b) => a.timestamp - b.timestamp);
+        if (recentHistory.length < 2) return overallAcc;
+        const accountIncrease = recentHistory.reduce((acc, currH, index, arr) => {
+            if (index === 0) return acc;
+            const prevH = arr[index - 1];
+            return acc + (currH.balance > prevH.balance ? (currH.balance - prevH.balance) : 0);
+        }, 0);
+        return overallAcc + accountIncrease;
+    }, 0);
+
+    if (totalIncrease === 0) {
+        return `预计速度: <span class="rate-stagnant">N/A (近10分钟无增)</span>`;
+    }
+    const estimatedHourly = totalIncrease * 6;
+    const rateClass = "rate-positive";
+    const prefix = "预计速度";
+
+    return `${prefix}: <span class="${rateClass}"><span class="rate-value">+${fmtAmt(estimatedHourly)}</span>/小时</span>`;
+  }
+
+  const getApiStatusOrder = s => {
+    switch (s) { case API_STATUS.ENABLED: return 0; case API_STATUS.STOP_RECEIPT: return 1; case API_STATUS.DISAPPEARED: return 2; case API_STATUS.CUSTOM_STOP: return 3; default: return 99; }
+  };
+
+  function renderColumnTogglePanel() {
+    columnTogglePanel.innerHTML = '列显示控制: ' + columnConfig.filter(c => c.hideable).map(c => `
+      <label title="${esc(c.label)}"><input type="checkbox" data-col-id="${esc(c.id)}" ${columnVisibility[c.id] ? 'checked' : ''}>${esc(c.label)}</label>
+    `).join('');
+  }
+
+  function handleColumnToggle(e) {
+    const cb = e.target; if (cb.type === 'checkbox' && cb.dataset.colId) { columnVisibility[cb.dataset.colId] = cb.checked; saveSetting(KEYS.COLUMN_VIS, columnVisibility); renderTable(); }
+  }
+
+  async function handleHeaderClick(e) {
+    const th = e.target.closest('th'); if (!th?.dataset.colId) return;
+    const colId = th.dataset.colId; const col = columnConfig.find(c => c.id === colId); if (!col?.sortable) return;
+    sortConfig = sortConfig.key === colId ? { key: colId, direction: sortConfig.direction === 'asc' ? 'desc' : 'asc' } : { key: colId, direction: 'asc' };
+    await saveSetting(KEYS.SORT_CONF, sortConfig); renderTable();
+  }
+
+  function renderTable() {
+    let headerHtml = '<thead><tr>';
+    columnConfig.forEach(c => {
+        let thClass = c.cssClass || '';
+        if (!columnVisibility[c.id] && c.id !== 'deleteAction') thClass += ' gds-col-hidden';
+        if (c.sortable) thClass += ' sortable';
+        headerHtml += `<th class="${thClass}" data-col-id="${c.id}" title="${esc(c.label)} ${c.sortable ? '(可排序)' : ''}">${esc(c.label)}${c.sortable && sortConfig.key === c.id ? (sortConfig.direction === 'asc' ? ' ▲' : ' ▼') : ''}</th>`;
+    });
+    headerHtml += '</tr></thead>';
+
+    const searchTerms = searchInput.value.toLowerCase().trim().split(/\s+/).filter(k => k);
+    let sortedAccounts = accountOrder.map(id => accountDataCache[id]).filter(Boolean);
+
+    sortedAccounts.sort((a, b) => {
+      const orderA = getApiStatusOrder(a.current?.apiStatus ?? -999); const orderB = getApiStatusOrder(b.current?.apiStatus ?? -999); if (orderA !== orderB) return orderA - orderB;
+      const currentSortCol = columnConfig.find(c => c.id === sortConfig.key);
+      let valA, valB;
+      if (currentSortCol) {
+        if (currentSortCol.id === 'id' || currentSortCol.id === 'loginStatus') { valA = parseInt(a.current?.[currentSortCol.dataKey] ?? '0', 10); valB = parseInt(b.current?.[currentSortCol.dataKey] ?? '0', 10); }
+        else if (['balance', 'frozenBalance'].includes(currentSortCol.id)) { valA = parseFloat(a.current?.[currentSortCol.dataKey] ?? -Infinity); valB = parseFloat(b.current?.[currentSortCol.dataKey] ?? -Infinity); }
+        else if (currentSortCol.id === 'apiStatus') { valA = parseInt(a.current?.id || '0', 10); valB = parseInt(b.current?.id || '0', 10); return valA - valB; }
+        else if (currentSortCol.id === 'lastChangeTime') { valA = a.current?.lastChangeTime ? new Date(String(a.current.lastChangeTime).replace(/-/g, '/')).getTime() : 0; valB = b.current?.lastChangeTime ? new Date(String(b.current.lastChangeTime).replace(/-/g, '/')).getTime() : 0; }
+        else if (currentSortCol.id === 'balanceFailed') { valA = a.current?.balanceFailed ? 1 : 0; valB = b.current?.balanceFailed ? 1 : 0; }
+        else if (currentSortCol.dataKey) { valA = String(a.current?.[currentSortCol.dataKey] ?? '').toLowerCase(); valB = String(b.current?.[currentSortCol.dataKey] ?? '').toLowerCase(); }
+        else { valA = parseInt(a.current?.id || '0', 10); valB = parseInt(b.current?.id || '0', 10); }
+      } else { valA = parseInt(a.current?.id || '0', 10); valB = parseInt(b.current?.id || '0', 10); }
+      let comparison = (typeof valA === 'number' && typeof valB === 'number') ? (valA - valB) : (String(valA) < String(valB) ? -1 : (String(valA) > String(valB) ? 1 : 0));
+      if (sortConfig.direction === 'desc') comparison *= -1;
+      return comparison === 0 ? (parseInt(a.current?.id || '0', 10) - parseInt(b.current?.id || '0', 10)) : comparison;
+    });
+
+    let bodyHtml = '<tbody>';
+    sortedAccounts.forEach(c => {
+      const acc = c.current; const txS = c.autoTransferSettings; const stopS = c.autoStopReceiptSettings;
+      if (!acc || (searchTerms.length > 0 && !searchTerms.every(k => `${acc.id} ${acc.platform} ${acc.accountName} ${acc.phone} ${acc.remarks || ''} ${acc.failedReason || ''}`.toLowerCase().includes(k)))) return;
+      let rowHtml = `<tr data-account-id="${esc(acc.id)}">`;
+      columnConfig.forEach(col => {
+        let cellClass = col.cssClass || ''; if (!columnVisibility[col.id] && col.id !== 'deleteAction') cellClass += ' gds-col-hidden';
+        let content = '';
+        switch (col.id) {
+          case 'deleteAction': content = `<button class="delete-account-btn" data-account-id="${esc(acc.id)}" title="删除此账户的本地记录">删</button>`; break;
+          case 'id': content = esc(acc.id); break; case 'platform': content = esc(acc.platform); break;
+          case 'accountName': content = esc(acc.accountName); cellClass += `" title="${esc(acc.description || '')}`; break;
+          case 'phone': content = esc(acc.phone); break;
+          case 'balance':
+            if (acc.balance >= 0 && acc.balance < 200000) { let tierSuffix = '0'; if (acc.balance >= 150000) tierSuffix = '4'; else if (acc.balance >= 100000) tierSuffix = '3'; else if (acc.balance >= 50000) tierSuffix = '2'; else if (acc.balance >= 10000) tierSuffix = '1'; cellClass += ` balance-tier-${tierSuffix}`; }
+            if (acc.balance >= 200000) cellClass += ' bal-high'; else if (acc.balance < 0) cellClass += ' bal-negative';
+            content = fmtAmt(acc.balance); break;
+          case 'frozenBalance': if (acc.frozenBalance > 0) cellClass += ' frozen-positive'; content = fmtAmt(acc.frozenBalance); break;
+          case 'apiStatus': const sI = fmtApiStatus(acc.apiStatus); cellClass += ` ${esc(sI.class)}`; content = esc(sI.text); break;
+          case 'loginStatus':
+            const lI = acc.isDisappeared ? fmtLoginStatus(0) : fmtLoginStatus(acc.loginStatus);
+            cellClass += ` ${esc(lI.class)}`;
+            content = esc(lI.text);
+            break;
+          case 'failedReason': content = esc(acc.failedReason || '无'); cellClass += `" title="${esc(acc.failedReason || '')}`; break;
+          case 'balanceFailed': content = acc.balanceFailed ? '是' : '否'; if (acc.balanceFailed) cellClass += ' balance-failed-yes'; break;
+          case 'remarks': content = `<input type="text" class="remarks-input" data-account-id="${esc(acc.id)}" value="${esc(acc.remarks || '')}" placeholder="    ">`; break;
+          case 'lastChangeTime': content = acc.lastChangeTime ? esc(acc.lastChangeTime) : 'N/A'; break;
+          case 'statusOp': content = `<button class="status-op-btn ${acc.apiStatus === API_STATUS.ENABLED && !acc.isDisappeared ? 'active' : ''}" data-op="set-status" data-status="${API_STATUS.ENABLED}">启用</button> <button class="status-op-btn ${acc.apiStatus === API_STATUS.STOP_RECEIPT && !acc.isDisappeared ? 'active' : ''}" data-op="set-status" data-status="${API_STATUS.STOP_RECEIPT}">止收</button> <button class="status-op-btn ${acc.apiStatus === API_STATUS.CUSTOM_STOP && !acc.isDisappeared ? 'active' : ''}" data-op="set-status" data-status="${API_STATUS.CUSTOM_STOP}">停止</button>`; break;
+          case 'autoStopReceiptEnabled': content = `<input type="checkbox" class="autostopreceipt-setting" data-setting="enabled" ${stopS.enabled ? 'checked' : ''}/>`; break;
+          case 'autoStopReceiptTriggerAmount': content = `<input type="number" class="autostopreceipt-setting" data-setting="triggerAmount" value="${esc(String(stopS.triggerAmount))}" placeholder="金额"/>`; break;
+          case 'autoTransferEnabled': content = `<input type="checkbox" class="autotransfer-setting" data-setting="enabled" ${txS.enabled ? 'checked' : ''}/>`; break;
+          case 'autoTransferTriggerAmount': content = `<input type="number" class="autotransfer-setting" data-setting="triggerAmount" value="${esc(String(txS.triggerAmount))}" placeholder="金额"/>`; break;
+          case 'autoTransferPayeeId': content = `<select class="autotransfer-setting" data-setting="payeeId"><option value="">--选择--</option>${PAYEE_OPTS.map(opt => `<option value="${opt.payeeId}" ${String(txS.payeeId) === String(opt.payeeId) ? 'selected' : ''}>${esc(opt.name)}</option>`).join('')}</select>`; break;
+          case 'autoTransferMode': content = `<select class="autotransfer-setting" data-setting="transferMode"><option value="">--选择--</option>${TRANSFER_MODE_OPTS.map(opt => `<option value="${opt.transferMode}" ${String(txS.transferMode) === String(opt.transferMode) ? 'selected' : ''}>${esc(opt.name)}</option>`).join('')}</select>`; break;
+          case 'autoTransferPercentage': content = `<select class="autotransfer-setting" data-setting="transferPercentage">${TRANSFER_PERCENT_OPTS.map(opt => `<option value="${opt.value}" ${parseFloat(txS.transferPercentage) === opt.value ? 'selected' : ''}>${esc(opt.name)}</option>`).join('')}</select>`; break;
+          case 'autoTransferRoundToInteger':
+            content = `<input type="checkbox" class="autotransfer-setting" data-setting="roundToInteger" ${txS.roundToInteger ? 'checked' : ''}/>`; break;
         }
-        location.reload(); return;
-      }
-      if (!response.ok) {
-        const errorText = await response.text(); console.error('API 获取失败:', response.status, errorText);
-        let statusMsg = `API错误 ${response.status}`;
-        if (lastSuccessfulDataTimestamp) statusMsg += `. 数据可能陈旧 (截至 ${formatDateTime(lastSuccessfulDataTimestamp)})`;
-        showFetchStatus(statusMsg, 'error', 7000);
-        if (lastRefreshTimeEl) {
-            lastRefreshTimeEl.innerText = `API错误于: ${formatDateTime(fetchAttemptTime)}. ${lastSuccessfulDataTimestamp ? '旧数据截至: ' + formatDateTime(lastSuccessfulDataTimestamp) : ''}`;
-            lastRefreshTimeEl.classList.add('error');
+        rowHtml += `<td class="${cellClass}">${content}</td>`;
+      });
+      bodyHtml += `${rowHtml}</tr>`;
+    });
+    tableContainer.innerHTML = `<table>${headerHtml}${bodyHtml}</tbody></table>`;
+    if (sortedAccounts.length === 0 && Object.keys(accountDataCache).length === 0) tableContainer.querySelector('tbody').innerHTML = `<tr><td colspan="${columnConfig.length}" style="text-align: center;">没有账户数据或搜索结果。</td></tr>`;
+
+    updateAllRemarksInputsWidth();
+
+    const thead = tableContainer.querySelector('thead'); if (thead) { thead.removeEventListener('click', handleHeaderClick); thead.addEventListener('click', handleHeaderClick); }
+  }
+
+  function updateAllRemarksInputsWidth() {
+    const measurer = D('remarks-width-measurer');
+    if (!measurer) return;
+
+    const allInputs = tableContainer.querySelectorAll('.remarks-input');
+    if (allInputs.length === 0) return;
+
+    let maxWidth = 0;
+    allInputs.forEach(input => {
+        const textToMeasure = input.value || input.placeholder || '';
+        measurer.textContent = textToMeasure;
+        const currentWidth = measurer.offsetWidth;
+        if (currentWidth > maxWidth) {
+            maxWidth = currentWidth;
         }
-        if (isInitialLoad && Object.keys(accountDataCache).length > 0) renderTable(); return;
-      }
-      const jsonData = await response.json();
-      if (jsonData.code !== 1 || !jsonData.data || !Array.isArray(jsonData.data.list)) {
-        console.error('API 数据格式错误:', jsonData);
-        let statusMsg = `API数据格式错误: ${jsonData.msg || '未知'}`;
-        if (lastSuccessfulDataTimestamp) statusMsg += `. 数据可能陈旧 (截至 ${formatDateTime(lastSuccessfulDataTimestamp)})`;
-        showFetchStatus(statusMsg, 'error', 7000);
-        if (lastRefreshTimeEl) {
-            lastRefreshTimeEl.innerText = `API数据错误于: ${formatDateTime(fetchAttemptTime)}. ${lastSuccessfulDataTimestamp ? '旧数据截至: ' + formatDateTime(lastSuccessfulDataTimestamp) : ''}`;
-            lastRefreshTimeEl.classList.add('error');
-        }
-        if (isInitialLoad && Object.keys(accountDataCache).length > 0) renderTable(); return;
-      }
+    });
 
-      if (lastRefreshTimeEl) {
-          lastRefreshTimeEl.innerText = `数据更新于: ${formatDateTime(fetchAttemptTime)}`;
-          lastRefreshTimeEl.classList.remove('error');
+    const finalWidth = maxWidth + 5;
+    allInputs.forEach(input => {
+        input.style.width = `${finalWidth}px`;
+    });
+  }
+
+  async function _handleRemarksChange(e) {
+      const input = e.target;
+      const accId = input.dataset.accountId;
+      if (!accId || !accountDataCache[accId]) return;
+      const cacheEntry = accountDataCache[accId];
+      const newValue = input.value;
+      const oldValue = cacheEntry.current.remarks || '';
+      if (newValue === oldValue) return;
+      cacheEntry.current.remarks = newValue;
+      await saveAccountDataToDB();
+      const logMessage = `<span class="log-setting-change">备注更新: 从 "${esc(oldValue)}" 改为 "${esc(newValue)}"</span>`;
+      _addLogEntry(operationLogs, STORES.OP_LOGS, MAX_LOG_MEM, MAX_LOG_DB, { accountId: accId, accountName: cacheEntry.current?.accountName || 'N/A', message: logMessage });
+      showToast(`ID ${accId}: 备注已保存`, e.clientX, e.clientY, 1000);
+  }
+
+  async function _handleSettingChange(e, type) {
+    const t = e.target; const accId = t.closest('tr').dataset.accountId; if (!accId || !accountDataCache[accId]) return;
+    const cacheEntry = accountDataCache[accId]; const settingsObj = type === 'autoTransfer' ? cacheEntry.autoTransferSettings : cacheEntry.autoStopReceiptSettings;
+    const oldSettings = { ...settingsObj }; const settingName = t.dataset.setting;
+    let newValue = (t.type === 'checkbox') ? t.checked : t.value; let displayValue = newValue;
+    let settingDisplayName = settingName; let oldDisplayValue = oldSettings[settingName];
+
+    if (settingName.includes('triggerAmount')) {
+      const numVal = parseFloat(newValue);
+      if (newValue !== '' && (isNaN(numVal) || numVal < 0)) { showToast('触发金额必须是有效的非负数字或为空', e.clientX, e.clientY, 2000); t.value = oldSettings[settingName] || ''; return; }
+      newValue = newValue === '' ? (type === 'autoStopReceipt' ? DEFAULT_AUTO_STOP_AMT : '') : numVal;
+      displayValue = newValue === '' ? '(空)' : fmtAmt(newValue); oldDisplayValue = oldSettings[settingName] === '' || oldSettings[settingName] === undefined ? '(空)' : fmtAmt(oldSettings[settingName]);
+    } else if (settingName === 'payeeId' || settingName === 'transferMode') {
+      newValue = newValue === '' ? '' : parseInt(newValue, 10); const opts = settingName === 'payeeId' ? PAYEE_OPTS : TRANSFER_MODE_OPTS;
+      const newOpt = opts.find(opt => opt[settingName] === newValue); displayValue = newOpt ? `${newOpt.name} (${settingName === 'payeeId' ? 'ID: ' : ''}${newValue})` : (newValue === '' ? '(空)' : `${settingName === 'payeeId' ? 'PayeeID' : 'Mode'} ${newValue}`);
+      const oldOpt = opts.find(opt => opt[settingName] === oldSettings[settingName]); oldDisplayValue = oldOpt ? `${oldOpt.name} (${settingName === 'payeeId' ? 'ID: ' : ''}${oldSettings[settingName]})` : (oldSettings[settingName] === '' || oldSettings[settingName] === undefined ? '(空)' : `${settingName === 'payeeId' ? 'PayeeID' : 'Mode'} ${oldSettings[settingName]}`);
+    } else if (settingName === 'transferPercentage') {
+      newValue = parseFloat(newValue); const newOpt = TRANSFER_PERCENT_OPTS.find(opt => opt.value === newValue); displayValue = newOpt ? newOpt.name : `${(newValue * 100).toFixed(0)}%`;
+      const oldOpt = TRANSFER_PERCENT_OPTS.find(opt => opt.value === oldSettings[settingName]); oldDisplayValue = oldOpt ? oldOpt.name : (oldSettings[settingName] !== undefined ? `${(oldSettings[settingName] * 100).toFixed(0)}%` : '(空)');
+    } else { displayValue = newValue ? '是' : '否'; oldDisplayValue = oldSettings[settingName] ? '是' : '否'; }
+
+    if (settingName === 'transferPercentage' && Math.abs(oldSettings.transferPercentage - newValue) < 0.001) return;
+    if (String(oldSettings[settingName]) === String(newValue)) return;
+    settingsObj[settingName] = newValue; await saveAccountDataToDB();
+
+    switch(settingName) {
+        case 'enabled': settingDisplayName = type === 'autoTransfer' ? '开启自动划转' : '开启自动止收'; break;
+        case 'triggerAmount': settingDisplayName = type === 'autoTransfer' ? '触发金额' : '止收触发金额'; break;
+        case 'payeeId': settingDisplayName = '收款账户'; break;
+        case 'transferMode': settingDisplayName = '划转模式'; break;
+        case 'transferPercentage': settingDisplayName = '划转比例'; break;
+        case 'roundToInteger': settingDisplayName = '取整'; break;
+    }
+    _addLogEntry(operationLogs, STORES.OP_LOGS, MAX_LOG_MEM, MAX_LOG_DB, { accountId: accId, accountName: cacheEntry.current?.accountName || 'N/A', message: `<span class="log-setting-change">${type === 'autoTransfer' ? '自动划转' : '自动止收'}设置: ${esc(settingDisplayName)} 从 "${esc(String(oldDisplayValue))}" 改为 "${esc(String(displayValue))}"</span>` });
+    showToast(`ID ${accId}: "${esc(settingDisplayName)}" 已更新`, e.clientX, e.clientY, 1000);
+  }
+
+  async function loadPersistedData() {
+    console.log("正在从 IndexedDB 加载持久化数据...");
+    try {
+      await dbHelper.openDB();
+      const [cacheSetting, orderSetting, lastRefreshSetting, colVisSetting, sortConfSetting] = await Promise.all([
+        dbHelper.get(STORES.ACC_DATA, KEYS.ACCOUNT_CACHE),
+        dbHelper.get(STORES.ACC_ORDER, KEYS.ACCOUNT_ORDER),
+        loadSetting(KEYS.LAST_REFRESH, null),
+        loadSetting(KEYS.COLUMN_VIS, {}),
+        loadSetting(KEYS.SORT_CONF, { key: 'id', direction: 'asc' })
+      ]);
+      accountDataCache = cacheSetting || {};
+      accountOrder = orderSetting || [];
+      lastSuccessfulDataTimestamp = lastRefreshSetting ? new Date(lastRefreshSetting) : null;
+      columnVisibility = colVisSetting || {};
+      sortConfig = sortConfSetting;
+
+      for (const accId in accountDataCache) {
+        const c = accountDataCache[accId];
+        Object.assign(c, { autoTransferSettings: initAutoTxSettings(c.autoTransferSettings), autoStopReceiptSettings: initAutoStopSettings(c.autoStopReceiptSettings), lastSuccessfulTransferTime: c.lastSuccessfulTransferTime ?? 0, lastAutoStopAttempt: c.lastAutoStopAttempt ?? 0, lastTransferAttemptTime: c.lastTransferAttemptTime ?? 0, isAutoStoppedByScript: c.isAutoStoppedByScript ?? false, lastAutoReEnableAttempt: c.lastAutoReEnableAttempt ?? 0, lastFailedTransferTime: c.lastFailedTransferTime ?? 0, current: c.current || {} });
+        c.current.balanceHistory = (c.current.balanceHistory || []).slice(-MAX_BAL_HISTORY);
       }
-      lastSuccessfulDataTimestamp = fetchAttemptTime;
-      localStorage.setItem(KEY_LAST_SUCCESSFUL_REFRESH, lastSuccessfulDataTimestamp.toISOString());
+      if (lastRefreshTimeEl && lastSuccessfulDataTimestamp) lastRefreshTimeEl.innerText = `上次成功更新: ${fmtDT(lastSuccessfulDataTimestamp)}`;
+      operationLogs = (await dbHelper.getAll(STORES.OP_LOGS, null, 'prev') || []).slice(0, MAX_LOG_MEM);
+      frozenBalanceIncreaseLogs = (await dbHelper.getAll(STORES.FROZEN_LOGS, null, 'prev') || []).slice(0, MAX_FROZEN_LOG_MEM);
+      _renderLogs(logDisplayContainer, operationLogs, '操作与变动日志');
+      _renderLogs(frozenLogDisplayContainer, frozenBalanceIncreaseLogs, '冻结金额增加日志');
+      renderColumnTogglePanel();
+      console.log("持久化数据加载尝试完成。");
+    } catch (e) {
+      console.error("加载持久化数据时发生严重错误:", e);
+      accountDataCache = {}; accountOrder = []; operationLogs = []; frozenBalanceIncreaseLogs = [];
+      columnConfig.forEach(c => columnVisibility[c.id] = c.defaultVisible);
+      sortConfig = { key: 'id', direction: 'asc' };
+      _renderLogs(logDisplayContainer, operationLogs, '操作与变动日志');
+      _renderLogs(frozenLogDisplayContainer, frozenBalanceIncreaseLogs, '冻结金额增加日志');
+      renderColumnTogglePanel();
+    }
+  }
 
-      const apiList = jsonData.data.list; const nowFormattedStr = formatDateTime(new Date()); const currentApiAccountIds = new Set();
-      if (accountOrder.length === 0 && apiList.length > 0 && isInitialLoad) { accountOrder = apiList.map(item => String(item.accountId)); }
+  async function saveAccountDataToDB() {
+    try {
+        await Promise.all([
+            dbHelper.set(STORES.ACC_DATA, KEYS.ACCOUNT_CACHE, accountDataCache),
+            dbHelper.set(STORES.ACC_ORDER, KEYS.ACCOUNT_ORDER, accountOrder)
+        ]);
+    }
+    catch (e) { console.error("保存账户数据/排序到 IndexedDB 时出错:", e); }
+  }
 
+  async function fetchAccountData(isInitialLoad = false) {
+    const fetchAttemptTime = new Date();
+    if (lastRefreshTimeEl && !isInitialLoad) { lastRefreshTimeEl.innerText = `正在刷新... (${fmtDT(fetchAttemptTime)})`; lastRefreshTimeEl.classList.remove('error'); }
+    try {
+      const res = await apiRequest({ method: "GET", url: "https://admin.gdspay.xyz/api/tripartite/v1/account/view", responseType: "json" });
+      if (!res.ok || res.rawJson?.code !== 1 || !Array.isArray(res.rawJson?.data?.list)) {
+        const errorMsg = res.rawJson?.msg || res.error || res.rawText || `状态码: ${res.status}`;
+        console.error('API 获取/数据格式错误:', errorMsg); showFetchStatus(`API错误: ${errorMsg}. ${lastSuccessfulDataTimestamp ? `数据可能陈旧 (截至 ${fmtDT(lastSuccessfulDataTimestamp)})` : ''}`, 'error', 7000);
+        if (lastRefreshTimeEl) { lastRefreshTimeEl.innerText = `API错误于: ${fmtDT(fetchAttemptTime)}. ${lastSuccessfulDataTimestamp ? '旧数据截至: ' + fmtDT(lastSuccessfulDataTimestamp) : ''}`; lastRefreshTimeEl.classList.add('error'); }
+        if (Object.keys(accountDataCache).length === 0) tableContainer.innerHTML = `获取数据失败：${esc(errorMsg)}。请检查网络或Token。`; else renderTable(); return;
+      }
+      if (lastRefreshTimeEl) { lastRefreshTimeEl.innerText = `数据更新于: ${fmtDT(fetchAttemptTime)}`; lastRefreshTimeEl.classList.remove('error'); }
+      lastSuccessfulDataTimestamp = fetchAttemptTime; await saveSetting(KEYS.LAST_REFRESH, lastSuccessfulDataTimestamp.toISOString());
+      const apiList = res.rawJson.data.list; const nowFormattedStr = fmtDT(new Date()); const currentApiAccountIds = new Set();
+      if (accountOrder.length === 0 && apiList.length > 0 && isInitialLoad) accountOrder = apiList.map(item => String(item.accountId));
       apiList.forEach(apiItem => {
-          const accountIdStr = String(apiItem.accountId); currentApiAccountIds.add(accountIdStr);
-          let cacheEntry = accountDataCache[accountIdStr]; if (!cacheEntry) { cacheEntry = { current: {}, autoTransferSettings: initializeAutoTransferSettings(null), lastSuccessfulTransferTime: 0 }; accountDataCache[accountIdStr] = cacheEntry; } else { cacheEntry.autoTransferSettings = initializeAutoTransferSettings(cacheEntry.autoTransferSettings); }
-          if (!cacheEntry.current) cacheEntry.current = {}; if (cacheEntry.lastSuccessfulTransferTime === undefined) cacheEntry.lastSuccessfulTransferTime = 0; if (!cacheEntry.current.balanceHistory) cacheEntry.current.balanceHistory = [];
-
-          const prevData = { ...cacheEntry.current }; // prevData is critical for change detection
-
-          // Initialize currentData with values from API
-          const currentData = {
-              id: accountIdStr,
+          const accIdStr = String(apiItem.accountId); currentApiAccountIds.add(accIdStr);
+          let c = accountDataCache[accIdStr] = accountDataCache[accIdStr] || { current: {}, autoTransferSettings: initAutoTxSettings(), autoStopReceiptSettings: initAutoStopSettings(), lastSuccessfulTransferTime: 0, lastAutoStopAttempt: 0, lastTransferAttemptTime: 0, isAutoStoppedByScript: false, lastAutoReEnableAttempt: 0, lastFailedTransferTime: 0 };
+          Object.assign(c, { autoTransferSettings: initAutoTxSettings(c.autoTransferSettings), autoStopReceiptSettings: initAutoStopSettings(c.autoStopReceiptSettings), lastSuccessfulTransferTime: c.lastSuccessfulTransferTime ?? 0, lastAutoStopAttempt: c.lastAutoStopAttempt ?? 0, lastTransferAttemptTime: c.lastTransferAttemptTime ?? 0, isAutoStoppedByScript: c.isAutoStoppedByScript ?? false, lastAutoReEnableAttempt: c.lastAutoReEnableAttempt ?? 0, lastFailedTransferTime: c.lastFailedTransferTime ?? 0 });
+          const prev = { ...c.current };
+          const current = {
+              id: accIdStr,
               platform: apiItem.tripartiteId,
               accountName: apiItem.accountName,
               phone: apiItem.otpReceiver,
@@ -394,356 +775,200 @@
               frozenBalance: parseFloat(apiItem.frozenBalance) / 100,
               apiStatus: parseInt(apiItem.accountStatus),
               description: apiItem.description,
-              lastHeartbeatTime: apiItem.lastHeartbeatTime ? formatDateTime(new Date(apiItem.lastHeartbeatTime)) : null,
-              lastChangeTime: prevData.lastChangeTime || nowFormattedStr, // Default to prev or now
+              lastHeartbeatTime: apiItem.lastHeartbeatTime ? fmtDT(new Date(apiItem.lastHeartbeatTime)) : null,
+              lastChangeTime: prev.lastChangeTime || nowFormattedStr,
               isDisappeared: false,
-              balanceHistory: prevData.balanceHistory ? [...prevData.balanceHistory] : []
+              balanceHistory: prev.balanceHistory ? [...prev.balanceHistory] : [],
+              remarks: prev.remarks || '',
+              loginStatus: parseInt(apiItem.loginStatus),
+              failedReason: apiItem.failedReason,
+              balanceFailed: apiItem.balanceFailed,
           };
-          if(!prevData.lastChangeTime){ currentData.lastChangeTime = nowFormattedStr; } // Ensure lastChangeTime is set
+          if(!prev.lastChangeTime) current.lastChangeTime = nowFormattedStr;
+          if (!isInitialLoad && prev.balance > 0 && current.balance === 0) { console.warn(`GDS 脚本 (ID: ${accIdStr}): API 返回余额为 0，上次为 ${fmtAmt(prev.balance)}。使用上次的值。`); current.balance = prev.balance; }
+          if (!isInitialLoad && prev.frozenBalance > 0 && current.frozenBalance === 0) { console.warn(`GDS 脚本 (ID: ${accIdStr}): API 返回冻结余额为 0，上次为 ${fmtAmt(prev.frozenBalance)}。使用上次的值。`); current.frozenBalance = prev.frozenBalance; }
+          let logMsgParts = []; let sigAmtChanged = false;
+          if (prev.balance !== undefined && current.balance !== prev.balance) { const diff = current.balance - prev.balance; logMsgParts.push(`余额: ${fmtAmt(prev.balance)} → ${fmtAmt(current.balance)} <span class="${diff > 0 ? 'log-amount-increase' : 'log-amount-decrease'}">(${diff > 0 ? '+' : ''}${fmtAmt(diff)})</span>`); sigAmtChanged = true; }
+          if (prev.frozenBalance !== undefined && current.frozenBalance !== prev.frozenBalance) { const diff = current.frozenBalance - prev.frozenBalance; const diffCls = diff > 0 ? 'log-amount-increase' : (diff < 0 ? 'log-amount-decrease' : ''); logMsgParts.push(`冻结: ${fmtAmt(prev.frozenBalance)} → ${fmtAmt(current.frozenBalance)} <span class="${diffCls}" style="${diff > 0 ? 'font-weight:bold;' : ''}">(${diff > 0 ? '+' : ''}${fmtAmt(diff)})</span>`); sigAmtChanged = true; if (diff > 0 && prev.frozenBalance >= 0 && !isInitialLoad) _addLogEntry(frozenBalanceIncreaseLogs, STORES.FROZEN_LOGS, MAX_FROZEN_LOG_MEM, MAX_FROZEN_LOG_DB, { accountId: accIdStr, accountName: current.accountName, message: `冻结金额增加: ${fmtAmt(prev.frozenBalance)} → ${fmtAmt(current.frozenBalance)} <span class="log-amount-increase" style="font-weight:bold;">(${diff > 0 ? '+' : ''}${fmtAmt(diff)})</span>` }); }
+          if (sigAmtChanged) current.lastChangeTime = nowFormattedStr;
 
-          // ---- START: Correction for API returning 0 when previous value was non-zero ----
-          if (!isInitialLoad) { // Only apply this correction after initial data load
-              if (prevData.balance !== undefined && prevData.balance > 0 && currentData.balance === 0) {
-                  console.warn(`GDS Script (ID: ${accountIdStr}): API returned balance 0, previous was ${formatAmount(prevData.balance)}. Using previous value.`);
-                  currentData.balance = prevData.balance; // Revert to previous balance
-              }
-              if (prevData.frozenBalance !== undefined && prevData.frozenBalance > 0 && currentData.frozenBalance === 0) {
-                  console.warn(`GDS Script (ID: ${accountIdStr}): API returned frozenBalance 0, previous was ${formatAmount(prevData.frozenBalance)}. Using previous value.`);
-                  currentData.frozenBalance = prevData.frozenBalance; // Revert to previous frozen balance
-              }
-          }
-          // ---- END: Correction ----
+          if (prev.apiStatus !== undefined && current.apiStatus !== prev.apiStatus) { logMsgParts.push(`在线状态: ${fmtApiStatus(prev.apiStatus).text} → <span class="log-status-change">${fmtApiStatus(current.apiStatus).text}</span>`); }
+          if (prev.loginStatus !== undefined && current.loginStatus !== prev.loginStatus) { logMsgParts.push(`登录状态: ${fmtLoginStatus(prev.loginStatus).text} → <span class="log-status-change">${fmtLoginStatus(current.loginStatus).text}</span>`); }
+          if (prev.balanceFailed !== undefined && current.balanceFailed !== prev.balanceFailed) { logMsgParts.push(`余额查询失败: ${prev.balanceFailed ? '是' : '否'} → <span class="log-status-change">${current.balanceFailed ? '是' : '否'}</span>`); }
 
-          let significantAmountChangeMade = false; let logMessageParts = [];
-
-          // Now, compare potentially corrected currentData with prevData
-          if (prevData.balance !== undefined && currentData.balance !== prevData.balance) {
-              const diff = currentData.balance - prevData.balance;
-              const diffStr = `(${diff > 0 ? '+' : ''}${formatAmount(diff)})`;
-              const diffClass = diff > 0 ? 'log-amount-increase' : 'log-amount-decrease';
-              logMessageParts.push(`余额: ${formatAmount(prevData.balance)} → ${formatAmount(currentData.balance)} <span class="${diffClass}">${diffStr}</span>`);
-              significantAmountChangeMade = true;
-          }
-          if (prevData.frozenBalance !== undefined && currentData.frozenBalance !== prevData.frozenBalance) {
-              const diff = currentData.frozenBalance - prevData.frozenBalance;
-              const diffStr = `(${diff > 0 ? '+' : ''}${formatAmount(diff)})`;
-              const diffClass = diff > 0 ? 'log-amount-increase' : (diff < 0 ? 'log-amount-decrease' : '');
-              const fontWeight = diff > 0 ? 'font-weight:bold;' : '';
-              logMessageParts.push(`冻结: ${formatAmount(prevData.frozenBalance)} → ${formatAmount(currentData.frozenBalance)} <span class="${diffClass}" style="${fontWeight}">${diffStr}</span>`);
-              significantAmountChangeMade = true;
-              if (diff > 0 && prevData.frozenBalance >= 0 && !isInitialLoad) { // Log only actual increases
-                  const frozenLogMsg = `冻结金额增加: ${formatAmount(prevData.frozenBalance)} → ${formatAmount(currentData.frozenBalance)} <span class="log-amount-increase" style="font-weight:bold;">${diffStr}</span>`;
-                  addFrozenLogEntry({ accountId: accountIdStr, accountName: currentData.accountName, message: frozenLogMsg });
-              }
+          if (prev.apiStatus !== undefined && current.apiStatus !== prev.apiStatus && prev.apiStatus === API_STATUS.STOP_RECEIPT && current.apiStatus !== API_STATUS.STOP_RECEIPT) {
+              if (c.isAutoStoppedByScript) { _addLogEntry(operationLogs, STORES.OP_LOGS, MAX_LOG_MEM, MAX_LOG_DB, { accountId: accIdStr, accountName: current.accountName, message: `API状态从“止收”变为“${fmtApiStatus(current.apiStatus).text}”，清除脚本自动止收标记。` }); }
+              c.isAutoStoppedByScript = false;
           }
 
-          if (significantAmountChangeMade) {
-              currentData.lastChangeTime = nowFormattedStr;
-          }
-
-          if (prevData.apiStatus !== undefined && currentData.apiStatus !== prevData.apiStatus) {
-              const statusChangeMsg = `在线状态: ${formatApiStatus(prevData.apiStatus).text} → <span class="log-status-change">${formatApiStatus(currentData.apiStatus).text}</span>`;
-              if (!significantAmountChangeMade && !isInitialLoad) {
-                  addLogEntry({ accountId: accountIdStr, accountName: currentData.accountName, message: statusChangeMsg });
-              } else if (significantAmountChangeMade) {
-                  logMessageParts.push(statusChangeMsg);
-              }
-          }
-
-          if (significantAmountChangeMade && !isInitialLoad && logMessageParts.length > 0) {
+          if (!isInitialLoad && logMsgParts.length > 0) {
               let intervalStr = 'N/A';
-              if (prevData.lastChangeTime) {
-                  const prevDate = new Date(prevData.lastChangeTime.replace(/-/g, '/'));
-                  const currChangeDate = new Date(currentData.lastChangeTime.replace(/-/g, '/'));
-                  if (!isNaN(prevDate) && !isNaN(currChangeDate)) {
-                      const diffMs = currChangeDate.getTime() - prevDate.getTime();
-                      if (diffMs >= 0) {
-                          intervalStr = formatInterval(Math.round(diffMs / 1000));
-                      }
-                  }
-              }
-              addLogEntry({ accountId: accountIdStr, accountName: currentData.accountName, message: logMessageParts.join('， '), interval: intervalStr });
+              if (sigAmtChanged && prev.lastChangeTime) { const prevDate = new Date(prev.lastChangeTime.replace(/-/g, '/')); const currDate = new Date(current.lastChangeTime.replace(/-/g, '/')); if (!isNaN(prevDate) && !isNaN(currDate)) intervalStr = fmtInt(Math.round((currDate - prevDate) / 1000)); }
+              _addLogEntry(operationLogs, STORES.OP_LOGS, MAX_LOG_MEM, MAX_LOG_DB, { accountId: accIdStr, accountName: current.accountName, message: logMsgParts.join('， '), interval: sigAmtChanged ? intervalStr : undefined });
           }
 
-          currentData.balanceHistory.push({ timestamp: Date.now(), balance: currentData.balance });
-          if (currentData.balanceHistory.length > MAX_ACCOUNT_BALANCE_HISTORY) {
-              currentData.balanceHistory.shift();
-          }
-
-          cacheEntry.current = currentData;
-          if (accountOrder.indexOf(accountIdStr) === -1) accountOrder.push(accountIdStr);
+          current.balanceHistory.push({ timestamp: Date.now(), balance: current.balance }); if (current.balanceHistory.length > MAX_BAL_HISTORY) current.balanceHistory.shift();
+          c.current = current; if (accountOrder.indexOf(accIdStr) === -1) accountOrder.push(accIdStr);
       });
-      accountOrder.forEach(accountIdStr => { if (!currentApiAccountIds.has(accountIdStr)) { const cacheEntry = accountDataCache[accountIdStr]; if (cacheEntry && cacheEntry.current && !cacheEntry.current.isDisappeared) { cacheEntry.current.isDisappeared = true; cacheEntry.current.apiStatus = SCRIPT_INTERNAL_STATUS_DISAPPEARED; addLogEntry({ accountId: accountIdStr, accountName: cacheEntry.current.accountName, message: '<span class="status-disappeared">账号在API响应中消失</span>' }); } } });
-      localStorage.setItem(KEY_ACCOUNT_DATA_CACHE, JSON.stringify(accountDataCache)); localStorage.setItem(KEY_ACCOUNT_ORDER, JSON.stringify(accountOrder));
-      renderTable();
-      const hourlyRateHtml = calculateEstimatedHourlyRate(accountDataCache); document.getElementById('gds-hourly-rate-display').innerHTML = hourlyRateHtml;
-      checkAndPerformAutoTransfers();
-    } catch (error) {
-        console.error('FetchAccountData 异常:', error);
-        let statusMsg = `脚本错误: ${error.message}`;
-        if (lastSuccessfulDataTimestamp) statusMsg += `. 数据可能陈旧 (截至 ${formatDateTime(lastSuccessfulDataTimestamp)})`;
-        showFetchStatus(statusMsg, 'error', 7000);
-        if (lastRefreshTimeEl) {
-            lastRefreshTimeEl.innerText = `脚本错误于: ${formatDateTime(fetchAttemptTime)}. ${lastSuccessfulDataTimestamp ? '旧数据截至: ' + formatDateTime(lastSuccessfulDataTimestamp) : ''}`;
-            lastRefreshTimeEl.classList.add('error');
-        }
-        tableContainer.innerHTML = `获取数据时发生脚本错误: ${error.message}。请检查控制台。`;
-        if (isInitialLoad && Object.keys(accountDataCache).length > 0) renderTable();
-    }
-  }
-
-  function renderColumnTogglePanel() {
-    let html = '列显示控制: ';
-    columnConfig.forEach(col => {
-        if (col.hideable) {
-            html += `<label title="${escapeHtml(col.label, true)}">
-                       <input type="checkbox" data-col-id="${escapeHtml(col.id)}" ${columnVisibility[col.id] ? 'checked' : ''}>
-                       ${escapeHtml(col.label)}
-                     </label>`;
-        }
-    });
-    columnTogglePanel.innerHTML = html;
-  }
-
-  function handleColumnToggle(event) {
-    const checkbox = event.target;
-    if (checkbox.type === 'checkbox' && checkbox.dataset.colId) {
-        const colId = checkbox.dataset.colId;
-        columnVisibility[colId] = checkbox.checked;
-        saveColumnVisibility();
-        renderTable();
-    }
-  }
-
-  function handleHeaderClick(event) {
-    const th = event.target.closest('th');
-    if (!th || !th.dataset.colId) return;
-
-    const colId = th.dataset.colId;
-    const col = columnConfig.find(c => c.id === colId);
-    if (!col || !col.sortable) return;
-
-    if (sortConfig.key === colId) {
-        sortConfig.direction = sortConfig.direction === 'asc' ? 'desc' : 'asc';
-    } else {
-        sortConfig.key = colId;
-        sortConfig.direction = 'asc';
-    }
-    saveSortConfig();
-    renderTable();
-  }
-
-  function renderTable() {
-    let headerHtml = '<thead><tr>';
-    columnConfig.forEach(col => {
-        let thClass = col.cssClass || '';
-        if (!columnVisibility[col.id]) thClass += ' gds-col-hidden';
-        if (col.sortable) thClass += ' sortable';
-
-        let sortIndicator = '';
-        if (col.sortable && sortConfig.key === col.id) {
-            sortIndicator = sortConfig.direction === 'asc' ? ' ▲' : ' ▼';
-        }
-        headerHtml += `<th class="${thClass}" data-col-id="${col.id}" title="${escapeHtml(col.label, true)} ${col.sortable ? '(可排序)' : ''}">${escapeHtml(col.label)}${sortIndicator}</th>`;
-    });
-    headerHtml += '</tr></thead>';
-
-    const searchTerm = document.getElementById('gds-search').value.toLowerCase().trim();
-    const searchKeywords = searchTerm ? searchTerm.split(/\s+/).filter(k => k) : [];
-
-    let sortedAccountData = accountOrder.map(id => accountDataCache[id]).filter(Boolean);
-
-    if (sortConfig.key) {
-        const sortCol = columnConfig.find(c => c.id === sortConfig.key);
-        if (sortCol && sortCol.dataKey) {
-            sortedAccountData.sort((a, b) => {
-                let valA = a.current?.[sortCol.dataKey];
-                let valB = b.current?.[sortCol.dataKey];
-
-                if (typeof valA === 'string' && typeof valB === 'string') {
-                    valA = valA.toLowerCase();
-                    valB = valB.toLowerCase();
-                } else if (typeof valA === 'number' && typeof valB === 'number') {
-                    // Native number sort is fine
-                } else if (sortCol.dataKey === 'lastChangeTime') {
-                    valA = valA ? new Date(String(valA).replace(/-/g, '/')).getTime() : 0;
-                    valB = valB ? new Date(String(valB).replace(/-/g, '/')).getTime() : 0;
-                } else {
-                    valA = String(valA).toLowerCase();
-                    valB = String(valB).toLowerCase();
-                }
-
-
-                if (valA < valB) return sortConfig.direction === 'asc' ? -1 : 1;
-                if (valA > valB) return sortConfig.direction === 'asc' ? 1 : -1;
-                return 0;
-            });
-        }
-    }
-
-
-    let bodyHtml = '<tbody>';
-    sortedAccountData.forEach(cacheEntry => {
-        if (!cacheEntry || !cacheEntry.current) return;
-        const acc = cacheEntry.current;
-        const settings = cacheEntry.autoTransferSettings;
-
-        if (searchKeywords.length > 0) { const searchableText = `${acc.id} ${acc.platform} ${acc.accountName} ${acc.phone}`.toLowerCase(); if (!searchKeywords.every(keyword => searchableText.includes(keyword))) return; }
-
-        let rowHtml = `<tr data-account-id="${escapeHtml(acc.id)}">`;
-
-        columnConfig.forEach(col => {
-            let cellClass = col.cssClass || '';
-            if (!columnVisibility[col.id]) cellClass += ' gds-col-hidden';
-            let cellContent = '';
-
-            switch (col.id) {
-                case 'id': cellContent = escapeHtml(acc.id); break;
-                case 'platform': cellContent = escapeHtml(acc.platform); break;
-                case 'accountName': cellContent = `<td class="${cellClass}" title="${escapeHtml(acc.description, true)}">${escapeHtml(acc.accountName)}</td>`; rowHtml += cellContent; return;
-                case 'phone': cellContent = escapeHtml(acc.phone); break;
-                case 'balance':
-                    let balanceCellClasses = cellClass;
-                    if (acc.balance >= 0 && acc.balance < 200000) { let tierSuffix = '0'; if (acc.balance >= 150000) tierSuffix = '4'; else if (acc.balance >= 100000) tierSuffix = '3'; else if (acc.balance >= 50000) tierSuffix = '2'; else if (acc.balance >= 10000) tierSuffix = '1'; balanceCellClasses += ` balance-tier-${tierSuffix}`; }
-                    if (acc.balance >= 200000) balanceCellClasses += ' bal-high'; else if (acc.balance < 0) balanceCellClasses += ' bal-negative';
-                    cellContent = `<td class="${balanceCellClasses}">${formatAmount(acc.balance)}</td>`; rowHtml += cellContent; return;
-                case 'frozenBalance': const frozenCls = acc.frozenBalance > 0 ? 'frozen-positive' : ''; cellContent = `<td class="${cellClass} ${frozenCls}">${formatAmount(acc.frozenBalance)}</td>`; rowHtml += cellContent; return;
-                case 'apiStatus': const statusInfo = formatApiStatus(acc.apiStatus); cellContent = `<td class="${cellClass} ${escapeHtml(statusInfo.class, true)}">${escapeHtml(statusInfo.text)}</td>`; rowHtml += cellContent; return;
-                case 'lastChangeTime': cellContent = acc.lastChangeTime ? escapeHtml(acc.lastChangeTime) : 'N/A'; break;
-                case 'statusOp': cellContent = `<button class="status-op-btn ${acc.apiStatus === API_STATUS_ENABLED && !acc.isDisappeared ? 'active' : ''}" data-op="set-status" data-status="${API_STATUS_ENABLED}">启用</button> <button class="status-op-btn ${acc.apiStatus === API_STATUS_STOP_RECEIPT && !acc.isDisappeared ? 'active' : ''}" data-op="set-status" data-status="${API_STATUS_STOP_RECEIPT}">止收</button> <button class="status-op-btn ${acc.apiStatus === API_STATUS_CUSTOM_STOP && !acc.isDisappeared ? 'active' : ''}" data-op="set-status" data-status="${API_STATUS_CUSTOM_STOP}">停止</button>`; break;
-                case 'autoTransferEnabled': cellContent = `<input type="checkbox" class="autotransfer-setting" data-setting="enabled" ${settings.enabled ? 'checked' : ''}/>`; break;
-                case 'autoTransferTriggerAmount': cellContent = `<input type="number" class="autotransfer-setting" data-setting="triggerAmount" value="${escapeHtml(String(settings.triggerAmount), true)}" placeholder="金额"/>`; break;
-                case 'autoTransferPayeeId': let payeeOptionsHtml = PAYEE_OPTIONS.map(opt => `<option value="${opt.payeeId}" ${String(settings.payeeId) === String(opt.payeeId) ? 'selected' : ''}>${escapeHtml(opt.name)}</option>`).join(''); cellContent = `<select class="autotransfer-setting" data-setting="payeeId"><option value="">--选择--</option>${payeeOptionsHtml}</select>`; break;
-                case 'autoTransferMode': let modeOptionsHtml = TRANSFER_MODE_OPTIONS.map(opt => `<option value="${opt.transferMode}" ${String(settings.transferMode) === String(opt.transferMode) ? 'selected' : ''}>${escapeHtml(opt.name)}</option>`).join(''); cellContent = `<select class="autotransfer-setting" data-setting="transferMode"><option value="">--选择--</option>${modeOptionsHtml}</select>`; break;
-                case 'autoTransferPercentage': let percentageOptionsHtml = TRANSFER_PERCENTAGE_OPTIONS.map(opt => `<option value="${opt.value}" ${parseFloat(settings.transferPercentage) === opt.value ? 'selected' : ''}>${escapeHtml(opt.name)}</option>`).join(''); cellContent = `<select class="autotransfer-setting" data-setting="transferPercentage">${percentageOptionsHtml}</select>`; break;
-                case 'autoTransferRoundToInteger': cellContent = `<input type="checkbox" class="autotransfer-setting" data-setting="roundToInteger" ${settings.roundToInteger ? 'checked' : ''}/>`; break;
-                default: cellContent = `N/A_col:${escapeHtml(col.id)}`;
-            }
-            if (!['accountName', 'balance', 'frozenBalance', 'apiStatus'].includes(col.id)) {
-                rowHtml += `<td class="${cellClass}">${cellContent}</td>`;
-            }
-        });
-        rowHtml += `</tr>`;
-        bodyHtml += rowHtml;
-    });
-    bodyHtml += `</tbody>`;
-    tableContainer.innerHTML = `<table>${headerHtml}${bodyHtml}</table>`;
-
-    const table = tableContainer.querySelector('table');
-    if (table) {
-        const thead = table.querySelector('thead');
-        if (thead) {
-            thead.removeEventListener('click', handleHeaderClick);
-            thead.addEventListener('click', handleHeaderClick);
-        }
-    }
-  }
-
-
-  function handleAutoTransferSettingChange(event) {
-      const target = event.target; if (!target.classList.contains('autotransfer-setting')) return;
-      const accountId = target.closest('tr').dataset.accountId; if (!accountId || !accountDataCache[accountId]) return;
-      const oldSettings = { ...accountDataCache[accountId].autoTransferSettings }; const settingName = target.dataset.setting;
-      let newValue = (target.type === 'checkbox') ? target.checked : target.value; let displayValue = newValue;
-      if (settingName === 'triggerAmount') { const numValue = parseFloat(newValue); if (newValue !== '' && (isNaN(numValue) || numValue < 0)) { showToast('触发金额必须是有效的非负数字或为空', event.clientX, event.clientY, 1500); target.value = oldSettings[settingName] || ''; return; } newValue = newValue === '' ? '' : numValue; displayValue = newValue === '' ? '(空)' : formatAmount(newValue); }
-      else if (settingName === 'payeeId' || settingName === 'transferMode') { newValue = newValue === '' ? '' : parseInt(newValue, 10); if (settingName === 'payeeId') { const selectedOption = PAYEE_OPTIONS.find(opt => opt.payeeId === newValue); displayValue = selectedOption ? selectedOption.name : (newValue === '' ? '(空)' : `PayeeID ${newValue}`); } else { const selectedOption = TRANSFER_MODE_OPTIONS.find(opt => opt.transferMode === newValue); displayValue = selectedOption ? selectedOption.name : (newValue === '' ? '(空)' : `Mode ${newValue}`); } }
-      else if (settingName === 'transferPercentage') { newValue = parseFloat(newValue); const selectedOption = TRANSFER_PERCENTAGE_OPTIONS.find(opt => opt.value === newValue); displayValue = selectedOption ? selectedOption.name : `${(newValue * 100).toFixed(0)}%`; }
-      else if (settingName === 'enabled' || settingName === 'roundToInteger') { displayValue = newValue ? '是' : '否'; }
-      if (settingName === 'transferPercentage') { if (oldSettings.transferPercentage === newValue) return; } else if (settingName === 'triggerAmount') { if (oldSettings.triggerAmount === newValue) return; } else { if (oldSettings[settingName] === newValue) return; }
-      accountDataCache[accountId].autoTransferSettings[settingName] = newValue; localStorage.setItem(KEY_ACCOUNT_DATA_CACHE, JSON.stringify(accountDataCache));
-      let settingDisplayName = settingName; let oldDisplayValue = oldSettings[settingName];
-      switch(settingName) { case 'enabled': settingDisplayName = '开启自动划转'; oldDisplayValue = oldSettings.enabled ? '是' : '否'; break; case 'triggerAmount': settingDisplayName = '触发金额'; oldDisplayValue = oldSettings.triggerAmount === '' || oldSettings.triggerAmount === undefined ? '(空)' : formatAmount(oldSettings.triggerAmount); break; case 'payeeId': settingDisplayName = '收款账户'; const oldPayeeOpt = PAYEE_OPTIONS.find(opt => opt.payeeId === oldSettings.payeeId); oldDisplayValue = oldPayeeOpt ? oldPayeeOpt.name : (oldSettings.payeeId === '' || oldSettings.payeeId === undefined ? '(空)' : `PayeeID ${oldSettings.payeeId}`); break; case 'transferMode': settingDisplayName = '划转模式'; const oldModeOpt = TRANSFER_MODE_OPTIONS.find(opt => opt.transferMode === oldSettings.transferMode); oldDisplayValue = oldModeOpt ? oldModeOpt.name : (oldSettings.transferMode === '' || oldSettings.transferMode === undefined ? '(空)' : `Mode ${oldSettings.transferMode}`); break; case 'transferPercentage': settingDisplayName = '划转比例'; const oldPercOpt = TRANSFER_PERCENTAGE_OPTIONS.find(opt => opt.value === oldSettings.transferPercentage); oldDisplayValue = oldPercOpt ? oldPercOpt.name : (oldSettings.transferPercentage !== undefined ? `${(oldSettings.transferPercentage * 100).toFixed(0)}%` : '(空)'); break; case 'roundToInteger': settingDisplayName = '金额取整(千)'; oldDisplayValue = oldSettings.roundToInteger ? '是' : '否'; break; }
-      addLogEntry({ accountId, accountName: accountDataCache[accountId].current?.accountName || 'N/A', message: `<span class="log-setting-change">自动划转设置: ${escapeHtml(settingDisplayName)} 从 "${escapeHtml(String(oldDisplayValue))}" 改为 "${escapeHtml(String(displayValue))}"</span>` });
-      showToast(`ID ${accountId}: "${escapeHtml(settingDisplayName)}" 已更新`, event.clientX, event.clientY, 1000);
-      if (settingName === 'enabled' && newValue === true) { checkAndPerformAutoTransfers(accountId); }
-  }
-
-  async function checkAndPerformAutoTransfers(specificAccountId = null) {
-      const accountsToCheck = specificAccountId ? [specificAccountId] : Object.keys(accountDataCache);
-      for (const accountId of accountsToCheck) {
-          const cacheEntry = accountDataCache[accountId]; if (!cacheEntry || !cacheEntry.current || !cacheEntry.autoTransferSettings || !cacheEntry.autoTransferSettings.enabled) { continue; }
-          const acc = cacheEntry.current; const settings = cacheEntry.autoTransferSettings; if (acc.isDisappeared || (acc.apiStatus !== API_STATUS_ENABLED && acc.apiStatus !== API_STATUS_STOP_RECEIPT)) { continue; }
-          const triggerAmount = parseFloat(settings.triggerAmount); if (isNaN(triggerAmount) || triggerAmount <= 0) continue;
-          if (acc.balance > triggerAmount) {
-              const now = Date.now(); if (cacheEntry.lastSuccessfulTransferTime && (now - cacheEntry.lastSuccessfulTransferTime < AUTO_TRANSFER_THROTTLE_MS)) { addLogEntry({ accountId, accountName: acc.accountName, message: `<span class="log-transfer-throttled">自动划转节流 (1分钟内已成功划转)</span>` }); continue; }
-              if (!settings.payeeId || !settings.transferMode) { addLogEntry({ accountId, accountName: acc.accountName, message: `<span class="log-transfer-fail">自动划转配置不完整 (收款账户或模式未选)</span>` }); continue; }
-              const transferPercentage = parseFloat(settings.transferPercentage); if (isNaN(transferPercentage) || transferPercentage <= 0 || transferPercentage > 1) { addLogEntry({ accountId, accountName: acc.accountName, message: `<span class="log-transfer-fail">自动划转失败: 无效的划转比例 (${escapeHtml(String(settings.transferPercentage))})</span>` }); continue; }
-              let transferAmountBase = acc.balance * transferPercentage; let amountInCents;
-              if (settings.roundToInteger) { let truncatedAmount = Math.floor(transferAmountBase / 1000) * 1000; amountInCents = Math.floor(truncatedAmount * 100); } else { amountInCents = Math.floor(Math.floor(transferAmountBase) * 100); }
-              if (amountInCents <= 0) { addLogEntry({ accountId, accountName: acc.accountName, message: `<span class="log-transfer-fail">计算后划转金额为0或负数 (${formatAmount(amountInCents/100)})，不执行</span>` }); continue; }
-              const token = localStorage.getItem('token'); if (!token) { console.warn("Token缺失，无法执行自动划转"); continue; }
-              const requestId = `req-${Date.now()}-${Math.random().toString(36).substring(2, 10)}`; const version = Date.now();
-              const payload = { tripartiteId: acc.platform, accountName: acc.accountName, payeeId: parseInt(settings.payeeId), amount: amountInCents, transferMode: parseInt(settings.transferMode), isBulk: false, version: version };
-              const payeeName = PAYEE_OPTIONS.find(p => p.payeeId === payload.payeeId)?.name || `PayeeID ${payload.payeeId}`; const modeName = TRANSFER_MODE_OPTIONS.find(m => m.transferMode === payload.transferMode)?.name || `Mode ${payload.transferMode}`;
-              addLogEntry({ accountId, accountName: acc.accountName, message: `<span class="log-transfer-attempt">尝试自动划转 ${formatAmount(amountInCents / 100)} 到 ${escapeHtml(payeeName)} (模式: ${escapeHtml(modeName)})</span>` });
-              showFetchStatus(`ID ${accountId}: 尝试自动划转 ${formatAmount(amountInCents / 100)}...`, 'info', 5000);
-              try {
-                  const response = await fetch("https://admin.gdspay.xyz/api/tripartite/v1/transfer/manual", { method: "POST", headers: { "accept": "application/json, text/plain, */*", "authorization": token, "content-type": "application/json", "X-Request-ID": requestId, "accept-language": "zh-CN,zh;q=0.9,en;q=0.8", "cache-control": "no-cache", "pragma": "no-cache", "sec-fetch-dest": "empty", "sec-fetch-mode": "cors", "sec-fetch-site": "same-origin" }, referrer: "https://admin.gdspay.xyz/transfer", referrerPolicy: "strict-origin-when-cross-origin", body: JSON.stringify(payload), credentials: "include" });
-                  const result = await response.json();
-                  if (result?.code === 1) { cacheEntry.lastSuccessfulTransferTime = Date.now(); localStorage.setItem(KEY_ACCOUNT_DATA_CACHE, JSON.stringify(accountDataCache)); addLogEntry({ accountId, accountName: acc.accountName, message: `<span class="log-transfer-success">自动划转 ${formatAmount(amountInCents / 100)} 到 ${escapeHtml(payeeName)} 成功!</span> (Version: ${version})` }); showFetchStatus(`ID ${accountId}: 自动划转成功!`, 'success', 3000); }
-                  else { addLogEntry({ accountId, accountName: acc.accountName, message: `<span class="log-transfer-fail">自动划转 ${formatAmount(amountInCents / 100)} 失败: ${escapeHtml(result?.msg || '未知错误')}</span>` }); showFetchStatus(`ID ${accountId}: 自动划转失败 - ${result?.msg}`, 'error', 5000); }
-              } catch (err) { console.error(`ID ${accountId}: 自动划转 API 请求错误:`, err); addLogEntry({ accountId, accountName: acc.accountName, message: `<span class="log-transfer-fail">自动划转 ${formatAmount(amountInCents / 100)} 请求异常: ${escapeHtml(err.message)}</span>` }); showFetchStatus(`ID ${accountId}: 自动划转请求异常`, 'error', 5000); }
+      accountOrder.forEach(accIdStr => {
+          const c = accountDataCache[accIdStr];
+          if (!currentApiAccountIds.has(accIdStr) && c?.current && !c.current.isDisappeared) {
+              c.current.isDisappeared = true;
+              c.current.apiStatus = API_STATUS.DISAPPEARED;
+              c.current.loginStatus = 0; // 强制设为未登录
+                 c.current.failedReason ="";
+              if (c.isAutoStoppedByScript) { _addLogEntry(operationLogs, STORES.OP_LOGS, MAX_LOG_MEM, MAX_LOG_DB, { accountId: accIdStr, accountName: c.current.accountName, message: `<span class="status-disappeared">账号在API响应中消失，清除脚本自动止收标记。</span>` }); c.isAutoStoppedByScript = false; }
+              else { _addLogEntry(operationLogs, STORES.OP_LOGS, MAX_LOG_MEM, MAX_LOG_DB, { accountId: accIdStr, accountName: c.current.accountName, message: '<span class="status-disappeared">账号在API响应中消失</span>' }); }
           }
-      }
-  }
-
-  async function handleTableClick(event) {
-    const target = event.target;
-    if (event.button === 2 && target.tagName === 'TD') { event.preventDefault(); const text = target.innerText.trim(); if (text) copyToClipboard(text, event); return; }
-    if (target.classList.contains('status-op-btn') && target.dataset.op === 'set-status') {
-        const accountId = target.closest('tr').dataset.accountId; const newApiStatus = parseInt(target.dataset.status); if (!accountId || isNaN(newApiStatus)) return;
-        const accCache = accountDataCache[accountId]; if (!accCache || !accCache.current) { showToast('账户数据异常', event.clientX, event.clientY); return; }
-        const { accountName, platform: tripartiteId } = accCache.current; const token = localStorage.getItem('token'); if (!token) { showToast('Token缺失', event.clientX, event.clientY); return; }
-        const oldApiStatus = accCache.current.apiStatus; if (oldApiStatus === newApiStatus && !accCache.current.isDisappeared) { showToast('状态未改变', event.clientX, event.clientY, 800); return; }
-        target.closest('td').querySelectorAll('.status-op-btn').forEach(btn => btn.disabled = true); showFetchStatus(`ID ${accountId}: 设置状态为 "${formatApiStatus(newApiStatus).text}"...`, 'info', 0);
-        try {
-            const payload = { accountId: parseInt(accountId), accountName, tripartiteId, accountStatus: newApiStatus };
-            const response = await fetch("https://admin.gdspay.xyz/api/tripartite/v1/account/status/modify", { "headers": { "accept": "application/json, text/plain, */*", "accept-language": "zh-CN,zh;q=0.9,en;q=0.8", "authorization": token, "cache-control": "no-cache", "content-type": "application/json", "pragma": "no-cache", "sec-fetch-dest": "empty", "sec-fetch-mode": "cors", "sec-fetch-site": "same-origin" }, "referrer": "https://admin.gdspay.xyz/tripartite", "referrerPolicy": "strict-origin-when-cross-origin", "body": JSON.stringify(payload), "method": "POST", "mode": "cors", "credentials": "include" });
-            const result = await response.json();
-            if (result.code === 1) { showFetchStatus(`ID ${accountId}: 状态设置成功!`, 'success', 2500); accCache.current.apiStatus = newApiStatus; target.closest('td').querySelectorAll('.status-op-btn').forEach(btn => { btn.classList.toggle('active', parseInt(btn.dataset.status) === newApiStatus && !accCache.current.isDisappeared); }); const statusCell = target.closest('tr').querySelector('.col-apiStatus'); if (statusCell) { const newStatusInfo = formatApiStatus(newApiStatus); statusCell.className = `col-apiStatus ${escapeHtml(newStatusInfo.class, true)} ${columnVisibility['apiStatus'] ? '' : 'gds-col-hidden'}`; statusCell.innerText = escapeHtml(newStatusInfo.text); } addLogEntry({ accountId, accountName, message: `手动操作: 在线状态从 ${formatApiStatus(oldApiStatus).text} → <span class="log-status-change">${formatApiStatus(newApiStatus).text}</span> <span class="log-api-op-success">(成功)</span>` });
-            } else { showFetchStatus(`ID ${accountId}: 状态设置失败 - ${result.msg || '未知错误'}`, 'error', 4000); addLogEntry({ accountId, accountName, message: `手动操作: 在线状态从 ${formatApiStatus(oldApiStatus).text} → ${formatApiStatus(newApiStatus).text} <span class="log-api-op-fail">(失败: ${escapeHtml(result.msg)})</span>` }); }
-        } catch (err) { console.error('设置状态API请求错误:', err); showFetchStatus(`ID ${accountId}: 状态设置请求异常 - ${err.message}`, 'error', 4000); addLogEntry({ accountId, accountName: accCache.current.accountName, message: `手动操作: 在线状态从 ${formatApiStatus(oldApiStatus).text} → ${formatApiStatus(newApiStatus).text} <span class="log-api-op-fail">(请求异常)</span>` });
-        } finally { target.closest('td').querySelectorAll('.status-op-btn').forEach(btn => btn.disabled = false); }
+      });
+      await saveAccountDataToDB(); renderTable(); hourlyRateDisplay.innerHTML = calculateEstimatedHourlyRate(accountDataCache);
+      await checkAndPerformAutoTransfers(); await checkAndPerformAutoStopReceipt(); await checkAndPerformAutoReEnable();
+    } catch (e) {
+        if (e.message === 'Token刷新失败，无法重试原请求。' || e.message === 'Token missing') {
+            console.warn('GDS 脚本: Token刷新或获取失败，将立即刷新页面。');
+            if (refreshIntervalId) clearInterval(refreshIntervalId); showFetchStatus('登录已过期或Token无效，即将刷新页面...', 'error', 0);
+            if (lastRefreshTimeEl) { lastRefreshTimeEl.innerText = `授权失败于: ${fmtDT(fetchAttemptTime)}. ${lastSuccessfulDataTimestamp ? '旧数据截至: ' + fmtDT(lastSuccessfulDataTimestamp) : ''}`; lastRefreshTimeEl.classList.add('error'); }
+            await GM_setValue(KEYS.RELOAD_DELAY, Date.now()); location.reload(); return;
+        }
+        console.error('FetchAccountData 异常:', e); showFetchStatus(`脚本错误: ${e.message}. ${lastSuccessfulDataTimestamp ? `数据可能陈旧 (截至 ${fmtDT(lastSuccessfulDataTimestamp)})` : ''}`, 'error', 7000);
+        if (lastRefreshTimeEl) { lastRefreshTimeEl.innerText = `脚本错误于: ${fmtDT(fetchAttemptTime)}. ${lastSuccessfulDataTimestamp ? '旧数据截至: ' + fmtDT(lastSuccessfulDataTimestamp) : ''}`; lastRefreshTimeEl.classList.add('error'); }
+        if (Object.keys(accountDataCache).length === 0) tableContainer.innerHTML = `获取数据时发生脚本错误: ${esc(e.message)}。请检查控制台。`; else renderTable();
     }
   }
 
-  // Event Listeners
+  async function handleCheckboxClick(e) {
+    const t = e.target;
+    const type = t.classList.contains('autotransfer-setting') ? 'autoTransfer' : 'autoStopReceipt';
+    await _handleSettingChange(e, type);
+  }
+
+  async function handleTableClick(e) {
+    const t = e.target;
+    if (e.button === 2 && t.tagName === 'TD') { e.preventDefault(); if (t.innerText.trim()) copyToClipboard(t.innerText.trim(), e); return; }
+
+    if (t.classList.contains('delete-account-btn')) {
+      const accId = t.dataset.accountId; if (!accId) return;
+      const accName = accountDataCache[accId]?.current?.accountName || 'N/A';
+      if (confirm(`确定要从本地删除账户 ID: ${accId} (${accName}) 的所有记录吗？\n此操作不可撤销，且仅影响本地数据。`)) {
+        delete accountDataCache[accId]; accountOrder = accountOrder.filter(id => id !== accId);
+        try { await saveAccountDataToDB(); _addLogEntry(operationLogs, STORES.OP_LOGS, MAX_LOG_MEM, MAX_LOG_DB, { accountId: accId, accountName: accName, message: `<span class="log-local-delete">本地账户记录已删除</span>` }); showToast(`账户 ID: ${accId} 本地记录已删除`, e.clientX + 10, e.clientY + 10, 2000); renderTable(); }
+        catch (err) { console.error(`从数据库删除账户 ${accId} 时出错:`, err); showToast(`删除账户 ${accId} 本地记录失败 (DB错误)`, e.clientX + 10, e.clientY + 10, 3000); }
+      } return;
+    }
+
+    if (t.classList.contains('status-op-btn') && t.dataset.op === 'set-status') {
+      const accId = t.closest('tr').dataset.accountId; const newStatus = parseInt(t.dataset.status); if (!accId || isNaN(newStatus)) return;
+      t.closest('td').querySelectorAll('.status-op-btn').forEach(btn => btn.disabled = true);
+      await _setAccountApiStatus(accId, newStatus, "手动操作");
+      t.closest('td').querySelectorAll('.status-op-btn').forEach(btn => btn.disabled = false);
+    }
+
+    if (t.type === 'checkbox' && (t.classList.contains('autotransfer-setting') || t.classList.contains('autostopreceipt-setting'))) {
+        handleCheckboxClick(e);
+    }
+  }
+
+  async function exportLogs(e) {
+    const searchTerms = searchInput.value.toLowerCase().trim().split(/\s+/).filter(k => k);
+    const processLogs = (logs, typePrefix) => logs.filter(log => { const searchableText = `${log.time || ''} ${log.accountId || ''} ${log.accountName || ''} ${stripHtml(log.message || '')}`.toLowerCase(); return searchTerms.every(k => searchableText.includes(k)); }).map(log => { let line = `[${typePrefix}] [${log.time || 'N/A'}] `; if (log.accountId) line += `ID:${esc(log.accountId)} (${esc(log.accountName || 'N/A')}): `; line += stripHtml(log.message || ''); if (log.interval && log.interval !== 'N/A' && typePrefix === '操作/变动') line += ` (间隔 ${esc(log.interval)})`; return line; });
+    const [fullOpLogs, fullFrozenLogs] = await Promise.all([dbHelper.getAll(STORES.OP_LOGS, null, 'prev'), dbHelper.getAll(STORES.FROZEN_LOGS, null, 'prev')]);
+    const exportedLines = [...processLogs(fullOpLogs, '操作/变动'), ...processLogs(fullFrozenLogs, '冻结增加')];
+    if (!exportedLines.length) { showToast('没有可导出的日志 (或无匹配搜索结果)', e.clientX + 10, e.clientY + 10, 2000); return; }
+    const filename = `GDS_Logs_${fmtDT(new Date()).replace(/[- :]/g, '')}.txt`;
+    try {
+      const blob = new Blob([exportedLines.join('\n')], { type: 'text/plain;charset=utf-8;' });
+      const link = Object.assign(document.createElement("a"), { href: URL.createObjectURL(blob), download: filename, style: 'visibility:hidden;' });
+      document.body.appendChild(link); link.click(); document.body.removeChild(link); URL.revokeObjectURL(link.href);
+      showToast(`日志已导出: ${filename}`, e.clientX + 10, e.clientY + 10, 2500);
+    } catch (err) { console.error("日志导出时出错:", err); showToast('导出日志时发生错误。', e.clientX + 10, e.clientY + 10, 3000); }
+  }
+
+  D('gds-clear-log').addEventListener('click', async e => {
+    if (confirm('确定要清空所有操作、变动及冻结增加日志吗？')) {
+      operationLogs = []; frozenBalanceIncreaseLogs = [];
+      try { await Promise.all([dbHelper.clear(STORES.OP_LOGS), dbHelper.clear(STORES.FROZEN_LOGS)]); _renderLogs(logDisplayContainer, operationLogs, '操作与变动日志'); showToast('所有日志已清空', e.clientX + 10, e.clientY + 10); }
+      catch (err) { console.error("从 IndexedDB 清空日志时出错:", err); showToast('清空日志失败 (DB错误)', e.clientX + 10, e.clientY + 10); }
+    }
+  });
+
+  D('gds-clear-prev-data').addEventListener('click', async e => {
+    if (confirm('警告：这将清空所有本地缓存的账户数据、排序、主题、列显示和日志 (通过 IndexedDB)！\n确定要重置脚本吗？')) {
+      try {
+        if (refreshIntervalId) clearInterval(refreshIntervalId); refreshIntervalId = null;
+        await dbHelper.deleteDB(); console.log("数据库已删除，正在重新初始化...");
+        accountDataCache = {}; accountOrder = []; operationLogs = []; frozenBalanceIncreaseLogs = [];
+        sortConfig = { key: 'id', direction: 'asc' }; lastSuccessfulDataTimestamp = null; currentTheme = 'light';
+        lastAutoTransferCheckInitiatedTime = 0; token = null; refreshToken = null; isRefreshingToken = false; refreshPromise = null;
+        if (lastRefreshTimeEl) { lastRefreshTimeEl.innerText = '数据未加载'; lastRefreshTimeEl.classList.remove('error'); }
+        await dbHelper.openDB(); applyTheme(await loadSetting(KEYS.THEME_PREF, 'light'));
+        const initialColumnVisibility = await loadSetting(KEYS.COLUMN_VIS, {});
+        columnConfig.forEach(c => columnVisibility[c.id] = initialColumnVisibility[c.id] !== undefined ? initialColumnVisibility[c.id] : c.defaultVisible);
+        sortConfig = await loadSetting(KEYS.SORT_CONF, { key: 'id', direction: 'asc' });
+        renderTable(); renderColumnTogglePanel();
+        _renderLogs(logDisplayContainer, operationLogs, '操作与变动日志'); _renderLogs(frozenLogDisplayContainer, frozenBalanceIncreaseLogs, '冻结金额增加日志');
+        showToast('脚本数据已重置!', e.clientX + 10, e.clientY + 10);
+        fetchAccountData(true);
+      } catch (err) { console.error("重置脚本数据时出错 (删除 IndexedDB):", err); showToast(`重置脚本失败: ${err.message || err}`, e.clientX + 10, e.clientY + 10, 3000); try { await dbHelper.openDB(); } catch (e2) { console.error("重置错误后重新打开数据库失败", e2); } }
+    }
+  });
+
+  // --- 事件监听器绑定 ---
   tableContainer.addEventListener('click', handleTableClick);
   tableContainer.addEventListener('contextmenu', handleTableClick);
-  tableContainer.addEventListener('change', handleAutoTransferSettingChange);
-  columnTogglePanel.addEventListener('change', handleColumnToggle);
-  document.getElementById('gds-search').addEventListener('input', renderTable);
-  document.getElementById('gds-refresh').addEventListener('click', () => { fetchAccountData(); });
-  document.getElementById('gds-toggle-theme').addEventListener('click', toggleTheme);
-  document.getElementById('gds-clear-log').addEventListener('click', (event) => { if (confirm('确定要清空所有操作、变动及冻结增加日志吗？')) { operationLogs = []; localStorage.removeItem(KEY_LOGS); renderLogs(); frozenBalanceIncreaseLogs = []; localStorage.removeItem(KEY_FROZEN_LOGS); renderFrozenLogs(); showToast('所有日志已清空', event.clientX, event.clientY); } });
-  document.getElementById('gds-clear-prev-data').addEventListener('click', (event) => {
-      if (confirm('警告：这将清空所有本地缓存的账户数据、排序、主题、列显示和日志！\n确定要重置脚本吗？')) {
-          localStorage.removeItem(KEY_ACCOUNT_DATA_CACHE); localStorage.removeItem(KEY_ACCOUNT_ORDER);
-          localStorage.removeItem(KEY_LOGS); localStorage.removeItem(KEY_FROZEN_LOGS);
-          localStorage.removeItem(KEY_THEME_PREFERENCE); localStorage.removeItem(KEY_COLUMN_VISIBILITY);
-          localStorage.removeItem(KEY_SORT_CONFIG); localStorage.removeItem(KEY_LAST_SUCCESSFUL_REFRESH);
-          accountDataCache = {}; accountOrder = []; operationLogs = []; frozenBalanceIncreaseLogs = [];
-          sortConfig = { key: 'id', direction: 'asc' };
-          lastSuccessfulDataTimestamp = null;
-          const lastRefreshTimeEl = document.getElementById('gds-last-refresh-time');
-          if(lastRefreshTimeEl) {
-              lastRefreshTimeEl.innerText = '数据未加载';
-              lastRefreshTimeEl.classList.remove('error');
-          }
-          loadColumnVisibility();
-          renderTable(); renderLogs(); renderFrozenLogs(); renderColumnTogglePanel();
-          applyTheme('light'); showToast('脚本数据已重置!', event.clientX, event.clientY);
-          fetchAccountData(true);
+
+  tableContainer.addEventListener('input', e => {
+      const t = e.target;
+      if (t.classList.contains('remarks-input')) {
+          updateAllRemarksInputsWidth();
       }
   });
 
-  // Initialization
-  console.log('GDS 账户信息增强版 (v3.1.8.2) 启动...');
-  loadThemePreference();
-  loadPersistedData();
-  fetchAccountData(true); // Initial fetch
-  if (localStorage.getItem('token')) { if (refreshIntervalId) clearInterval(refreshIntervalId); refreshIntervalId = setInterval(() => { fetchAccountData(false); }, REFRESH_INTERVAL_MS); // Subsequent fetches are not initial
-  } else { console.warn("未找到 Token，自动刷新已禁用。"); }
+  tableContainer.addEventListener('blur', (e) => {
+      const t = e.target;
+      if (t.type === 'checkbox') return; // 复选框的逻辑已移到 click 事件
+
+      if (t.classList.contains('remarks-input')) {
+          _handleRemarksChange(e);
+      } else if (t.classList.contains('autotransfer-setting')) {
+          _handleSettingChange(e, 'autoTransfer');
+      } else if (t.classList.contains('autostopreceipt-setting')) {
+          _handleSettingChange(e, 'autoStopReceipt');
+      }
+  }, true);
+
+  tableContainer.addEventListener('keydown', (e) => {
+      const t = e.target;
+      if ((t.classList.contains('remarks-input') ||
+           t.classList.contains('autotransfer-setting') ||
+           t.classList.contains('autostopreceipt-setting')) &&
+          e.key === 'Enter') {
+          if (t.tagName === 'SELECT' || t.type === 'checkbox') return;
+          e.preventDefault();
+          t.blur();
+      }
+  });
+
+  searchInput.addEventListener('input', () => { renderTable(); _renderLogs(logDisplayContainer, operationLogs, '操作与变动日志'); _renderLogs(frozenLogDisplayContainer, frozenBalanceIncreaseLogs, '冻结金额增加日志'); });
+  D('gds-refresh').addEventListener('click', () => { fetchAccountData(false); });
+  D('gds-toggle-theme').addEventListener('click', toggleTheme);
+  D('gds-export-logs').addEventListener('click', exportLogs);
+  columnTogglePanel.addEventListener('change', handleColumnToggle);
+
+  // --- 初始化流程 ---
+  console.log('GDS 账户信息增强版 (v3.2.87-mod3) 启动...');
+  const pendingReloadTimestamp = await GM_getValue(KEYS.RELOAD_DELAY, 0);
+  if (pendingReloadTimestamp > 0 && (Date.now() - pendingReloadTimestamp < RELOAD_FLAG_GRACE_MS)) {
+      console.log(`GDS 脚本: 检测到页面因401错误刷新，将延迟 ${RELOAD_DELAY_MS / 1000} 秒加载数据。`);
+      showFetchStatus(`检测到401后刷新。等待 ${RELOAD_DELAY_MS / 1000} 秒后重新加载数据...`, 'info', 0);
+      await GM_setValue(KEYS.RELOAD_DELAY, 0); await new Promise(res => setTimeout(res, RELOAD_DELAY_MS));
+      showFetchStatus('延迟结束，正在继续加载数据...', 'info', 2000);
+  }
+  applyTheme(await loadSetting(KEYS.THEME_PREF, 'light'));
+  await loadPersistedData();
+  token = localStorage.getItem('token'); refreshToken = localStorage.getItem('refreshToken');
+  await fetchAccountData(true);
+  if (token && !refreshIntervalId) { refreshIntervalId = setInterval(() => { fetchAccountData(false); }, REFRESH_INTERVAL_MS); }
+  else if (!token && Object.keys(accountDataCache).length === 0) { tableContainer.innerHTML = '错误：未找到登录 Token 或 Token 刷新失败。请登录后刷新页面。'; }
   window.addEventListener('beforeunload', () => { if (refreshIntervalId) clearInterval(refreshIntervalId); });
 
 })();
