@@ -32,7 +32,7 @@
   // ---- IndexedDB 配置 (共享GDS账户缓存，来自GDS_EnhancedScriptDB) ----
   const SHARED_GDS_DB_NAME = 'GDS_EnhancedScriptDB';
   const SHARED_GDS_STORE_NAME = 'accountData';
-  const SHARED_GDS_DB_VERSION =3;
+  const SHARED_GDS_DB_VERSION = 3;
   const KEY_FOR_SHARED_ACCOUNTS_OBJECT = 'gds_account_data_cache_idb_v3.2';
 
   // ---- 用于此脚本 IndexedDB 存储的键 ----
@@ -85,7 +85,6 @@
   let payoutThrottleTimestamps = {}; // 打款节流时间戳
   let bankBeneSelectedAccountId = null; // 银行受益人面板选中的GDS账户ID
   const transferAmountDebounceTimers = {}; // 新增：用于存储金额输入防抖定时器
-  const DEFAULT_API_TIMEOUT_MS = 45000; // 45秒，根据您图中的28秒等待时间稍微放宽
 
   // ---- IndexedDB 辅助函数 ----
   const idbHelper = (dbName, version, storeConfigs) => {
@@ -392,21 +391,15 @@
    * @param {string|object|URLSearchParams|FormData} data 请求体
    * @returns {Promise<object>} 包含 status, responseText, response 等的响应对象
    */
-async function gmFetch(method, url, headers = {}, data = null, timeout = DEFAULT_API_TIMEOUT_MS) {
-  return new Promise((resolve, reject) => {
-    GM_xmlhttpRequest({
-      method,
-      url,
-      headers,
-      data,
-      timeout: timeout, // 添加超时
-      onload: (resp) => resolve(resp),
-      onerror: (error) => reject(error),
-      ontimeout: (resp) => reject(new Error(`Request timed out for ${url}, status: ${resp.status}, readyState: ${resp.readyState}`)), // 处理超时事件
-      onabort: () => reject(new Error(`Request to ${url} aborted`)) // 处理请求取消
+  async function gmFetch(method, url, headers = {}, data = null) {
+    return new Promise((resolve, reject) => {
+      GM_xmlhttpRequest({
+        method, url, headers, data,
+        onload: (resp) => resolve(resp),
+        onerror: (error) => reject(error)
+      });
     });
-  });
-}
+  }
 
   // --- 日志管理 ---
   async function addLogEntry(logEntry, persistToDB = false, panelType = 'transaction') {
