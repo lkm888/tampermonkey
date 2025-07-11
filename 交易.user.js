@@ -6,8 +6,8 @@
 // @description  在GDS页面内嵌交易列表。打款金额不能超过订单金额。Bank列匹配GDS账户。新增受益人选择，打款后按钮1分钟节流。金额无逗号。增加删除交易记录功能。使用IndexedDB存储数据，从GDS_EnhancedScriptDB/accountData按指定键读取账户缓存。操作日志现分面板显示、可搜索、清除和导出。新增“扣钱”按钮，将打款金额从订单金额中扣除并更新到本地。(v1.4.18: 日志分面板管理，各自支持清除、导出、搜索过滤).
 // @match        https://admin.gdspay.xyz/222*
 // @grant        GM_xmlhttpRequest
-// @updateURL    https://raw.githubusercontent.com/lkm888/tampermonkey/main/GDS%20交易列表集成版%20(v1.3.0%20-%20受益人选择%2C%20打款节流%2C%20格式优化).user.js
-// @downloadURL  https://raw.githubusercontent.com/lkm888/tampermonkey/main/GDS%20交易列表集成版%20(v1.3.0%20-%20受益人选择%2C%20打款节流%2C%20格式优化).user.js
+// @updateURL    https://raw.githubusercontent.com/lkm888/tampermonkey/main/交易.user.js
+// @downloadURL  https://raw.githubusercontent.com/lkm888/tampermonkey/main/交易.user.js
 // ==/UserScript==
 
 (function() {
