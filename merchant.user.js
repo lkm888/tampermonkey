@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         GDS 综合报表工具集 (最终完美版)
+// @name         GDS 综合报表工具集
 // @namespace    gds-comprehensive-report-toolkit-final-perfected
 // @version      16.0
-// @description  【终极完美版】统一所有报表行为，日期选择不再记录，每次都从当天开始。UI界面精炼，移除多余边框，布局更清爽和谐。
+// @description  统一所有报表行为，日期选择不再记录，每次都从当天开始。UI界面精炼，移除多余边框，布局更清爽和谐。
 // @author       Your Name
 // @match        https://admin.gdspay.xyz/aa*
 // @grant        none
