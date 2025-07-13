@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GDS 综合报表工具集
-// @namespace    gds-comprehensive-report-toolkit-with-memory
-// @version      17.0
-// @description  自动加载您上次使用的报表，同时保留返回菜单的选项，兼具效率与灵活。
+// @namespace    gds-comprehensive-report-toolkit-reconciliation-plus
+// @version      18.0
+// @description  【功能增强】“按商户统计”新增“核对账变”与“差额”列，并自动标红差异，极大方便财务对账。
 // @author       Your Name
 // @match        https://admin.gdspay.xyz/aa*
 // @grant        none
@@ -17,8 +17,6 @@
     // =========================================================================
     // I. 共享模块 (Shared Modules)
     // =========================================================================
-
-    const LAST_REPORT_KEY = 'gds_last_report_type'; // 新增：用于本地存储的键
 
     function injectGlobalStyles() {
         const styles = `
@@ -85,6 +83,7 @@
         document.head.appendChild(styleSheet);
     }
 
+    const LAST_REPORT_KEY = 'gds_last_report_type';
     let uiElements;
 
     function createBaseUI() {
@@ -112,7 +111,6 @@
         closeBtn.onclick = () => overlay.style.display = 'none';
         overlay.onclick = (e) => { if (e.target === overlay) overlay.style.display = 'none'; };
 
-        // ---【记忆功能】修改启动逻辑 ---
         statsButton.addEventListener('click', () => {
             const lastReport = localStorage.getItem(LAST_REPORT_KEY);
             if (lastReport === 'reconciliation') {
@@ -120,7 +118,7 @@
             } else if (lastReport === 'merchant') {
                 merchantReport.initControls();
             } else {
-                showReportSelection(); // 默认或首次加载时显示选择界面
+                showReportSelection();
             }
             overlay.style.display = 'flex';
         });
@@ -140,7 +138,6 @@
         `;
         resultsContainer.innerHTML = '';
 
-        // ---【记忆功能】在选择时记录用户的偏好 ---
         document.getElementById('select-reconciliation-report').addEventListener('click', () => {
             localStorage.setItem(LAST_REPORT_KEY, 'reconciliation');
             reconciliationReport.initControls();
@@ -204,7 +201,6 @@
                 </label>
                 <button id="start-generation-btn">生成报表</button>
             `;
-
             document.getElementById('back-to-selection-btn').addEventListener('click', showReportSelection);
             controlsDiv.querySelector('#show-all-accounts-toggle').addEventListener('change', () => this.toggleView());
             controlsDiv.querySelector('#start-generation-btn').addEventListener('click', () => this.runReport());
@@ -459,7 +455,6 @@
             controlsDiv.innerHTML = '';
             controlsDiv.style.borderBottom = '1px solid #eee';
             resultsContainer.innerHTML = '';
-            // --- 【UI优化】移除过滤器组的边框，使其更简洁 ---
             controlsDiv.innerHTML = `
                 <button id="back-to-selection-btn">← 返回选择</button>
                 <label for="stats-date-input" style="font-weight: bold;">选择日期:</label>
@@ -530,10 +525,21 @@
                         } else {
                             td.classList.add('col-text');
                         }
-                        if (key === '账变 (₹)' || key === '当日佣金 (₹)' || key === '可用余额 (₹)') {
+
+                        if (key === '账变 (₹)' || key === '当日佣金 (₹)' || key === '可用余额 (₹)' || key === '核对账变 (₹)') {
                             td.classList.add('col-highlight');
-                            if (key === '账变 (₹)') { if (value > 0) td.classList.add('col-profit'); if (value < 0) td.classList.add('col-loss'); }
+                            if (key === '账变 (₹)' || key === '核对账变 (₹)') {
+                                if (value > 0) td.classList.add('col-profit');
+                                if (value < 0) td.classList.add('col-loss');
+                            }
                         }
+                        if (key === '差额 (₹)') {
+                            td.classList.add('col-highlight');
+                            if (Math.abs(value) > 0.01) {
+                                td.classList.add('col-loss');
+                            }
+                        }
+
                         td.innerText = formattedValue;
                         td.addEventListener('contextmenu', e => { e.preventDefault(); navigator.clipboard.writeText(td.innerText).then(() => {
                                 let feedback = td.querySelector('.copy-feedback'); if (!feedback) { feedback = document.createElement('div'); feedback.className = 'copy-feedback'; feedback.innerText = '已复制!'; td.appendChild(feedback); }
@@ -566,7 +572,7 @@
                 });
             });
             thead.appendChild(headerRow);
-            const sumColumns = ['可用余额 (₹)', '代收成功 (₹)', '代付成功 (₹)', '当日佣金 (₹)', '账变 (₹)'];
+            const sumColumns = ['可用余额 (₹)', '代收成功 (₹)', '代付成功 (₹)', '当日佣金 (₹)', '账变 (₹)', '核对账变 (₹)', '差额 (₹)'];
             const totals = {};
             sumColumns.forEach(header => { totals[header] = data.reduce((sum, row) => sum + (row[header] || 0), 0); });
             const footerRow = document.createElement('tr');
@@ -576,7 +582,8 @@
                 else if (totals[header] !== undefined) {
                     td.innerText = formatCurrency(totals[header]);
                     td.classList.add('col-number', 'col-highlight');
-                    if (header === '账变 (₹)') { if(totals[header] > 0) td.classList.add('col-profit'); if(totals[header] < 0) td.classList.add('col-loss'); }
+                    if (header === '账变 (₹)' || header === '核对账变 (₹)') { if(totals[header] > 0) td.classList.add('col-profit'); if(totals[header] < 0) td.classList.add('col-loss'); }
+                    if (header === '差额 (₹)') { if (Math.abs(totals[header]) > 0.01) { td.classList.add('col-loss'); } }
                 }
                 footerRow.appendChild(td);
             });
@@ -625,6 +632,12 @@
                     const stats = statsMap.get(m.merchantId) || defaultStats;
                     const paymentAmount = stats.paymentAmountComplete / 100, paymentCount = stats.paymentNumberComplete;
                     const payoutAmount = stats.payoutAmountComplete / 100, payoutCount = stats.payoutNumberComplete;
+                    const commission = stats.commissionFlow / 100;
+                    const balanceChange = stats.balanceFlow / 100;
+
+                    const calculatedChange = paymentAmount - payoutAmount - commission;
+                    const difference = balanceChange - calculatedChange;
+
                     return {
                         '商户ID': m.merchantId, '商户名称': m.merchantName, '账户状态': this.STATUS_MAP[m.status] || '未知',
                         '代收成功(笔)': paymentCount, '代收成功 (₹)': paymentAmount, '代收均额 (₹)': paymentCount > 0 ? paymentAmount / paymentCount : 0,
@@ -632,7 +645,11 @@
                         '代付成功(笔)': payoutCount, '代付成功 (₹)': payoutAmount, '代付均额 (₹)': payoutCount > 0 ? payoutAmount / payoutCount : 0,
                         '代付成功率': calculateRate(payoutCount, stats.payoutNumberInitiate),
                         '费率': `${safeToFixed(m.paymentCommissionRate/10)}% / ${safeToFixed(m.payoutCommissionRate/10)}% + ₹${safeToFixed(m.payoutCommissionExtra/100)}`,
-                        '当日佣金 (₹)': stats.commissionFlow / 100, '账变 (₹)': stats.balanceFlow / 100, '可用余额 (₹)': m.availableBalance / 100,
+                        '当日佣金 (₹)': commission,
+                        '账变 (₹)': balanceChange,
+                        '核对账变 (₹)': calculatedChange,
+                        '差额 (₹)': difference,
+                        '可用余额 (₹)': m.availableBalance / 100,
                     };
                 }).sort((a,b) => b['账变 (₹)'] - a['账变 (₹)']);
 
