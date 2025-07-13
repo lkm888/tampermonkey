@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GDS 综合报表工具集
-// @namespace    gds-comprehensive-report-toolkit-final-perfected
-// @version      16.0
-// @description  统一所有报表行为，日期选择不再记录，每次都从当天开始。UI界面精炼，移除多余边框，布局更清爽和谐。
+// @namespace    gds-comprehensive-report-toolkit-with-memory
+// @version      17.0
+// @description  自动加载您上次使用的报表，同时保留返回菜单的选项，兼具效率与灵活。
 // @author       Your Name
 // @match        https://admin.gdspay.xyz/aa*
 // @grant        none
@@ -17,6 +17,8 @@
     // =========================================================================
     // I. 共享模块 (Shared Modules)
     // =========================================================================
+
+    const LAST_REPORT_KEY = 'gds_last_report_type'; // 新增：用于本地存储的键
 
     function injectGlobalStyles() {
         const styles = `
@@ -109,10 +111,20 @@
         modal.appendChild(resultsContainer);
         closeBtn.onclick = () => overlay.style.display = 'none';
         overlay.onclick = (e) => { if (e.target === overlay) overlay.style.display = 'none'; };
+
+        // ---【记忆功能】修改启动逻辑 ---
         statsButton.addEventListener('click', () => {
-            showReportSelection();
+            const lastReport = localStorage.getItem(LAST_REPORT_KEY);
+            if (lastReport === 'reconciliation') {
+                reconciliationReport.initControls();
+            } else if (lastReport === 'merchant') {
+                merchantReport.initControls();
+            } else {
+                showReportSelection(); // 默认或首次加载时显示选择界面
+            }
             overlay.style.display = 'flex';
         });
+
         return { statsButton, overlay, modal, controlsDiv, resultsContainer };
     }
 
@@ -127,8 +139,16 @@
             </div>
         `;
         resultsContainer.innerHTML = '';
-        document.getElementById('select-reconciliation-report').addEventListener('click', () => reconciliationReport.initControls());
-        document.getElementById('select-merchant-report').addEventListener('click', () => merchantReport.initControls());
+
+        // ---【记忆功能】在选择时记录用户的偏好 ---
+        document.getElementById('select-reconciliation-report').addEventListener('click', () => {
+            localStorage.setItem(LAST_REPORT_KEY, 'reconciliation');
+            reconciliationReport.initControls();
+        });
+        document.getElementById('select-merchant-report').addEventListener('click', () => {
+            localStorage.setItem(LAST_REPORT_KEY, 'merchant');
+            merchantReport.initControls();
+        });
     }
 
     const MAX_RETRIES = 3, RETRY_DELAY = 500, PAGE_SIZE = 100;
@@ -439,27 +459,26 @@
             controlsDiv.innerHTML = '';
             controlsDiv.style.borderBottom = '1px solid #eee';
             resultsContainer.innerHTML = '';
+            // --- 【UI优化】移除过滤器组的边框，使其更简洁 ---
             controlsDiv.innerHTML = `
                 <button id="back-to-selection-btn">← 返回选择</button>
                 <label for="stats-date-input" style="font-weight: bold;">选择日期:</label>
                 <input type="date" id="stats-date-input" value="${getTodayString()}">
-                <div id="status-filter-group" style="display: flex; gap: 10px; align-items: center;">
-                    <label class="filter-label">账户状态:</label>
-                    ${Object.entries(this.STATUS_MAP).map(([value, text]) => `<label class="status-filter-label"><input type="checkbox" data-status="${value}" checked>${text}</label>`).join('')}
-                </div>
+                <label class="filter-label">账户状态:</label>
+                ${Object.entries(this.STATUS_MAP).map(([value, text]) => `<label class="status-filter-label"><input type="checkbox" data-status="${value}" checked>${text}</label>`).join('')}
                 <label class="filter-label"><input type="checkbox" id="filter-active-merchants" checked>仅显示活跃商户</label>
                 <button id="start-generation-btn">生成报表</button>
             `;
             document.getElementById('back-to-selection-btn').addEventListener('click', showReportSelection);
             document.getElementById('start-generation-btn').addEventListener('click', () => this.runReport());
-            controlsDiv.querySelectorAll('#status-filter-group input, #filter-active-merchants').forEach(el => el.addEventListener('change', () => this.displayResults()));
+            controlsDiv.querySelectorAll('[data-status], #filter-active-merchants').forEach(el => el.addEventListener('change', () => this.displayResults()));
         },
         displayResults() {
             if (this.masterResultData.length === 0 && this.currentReportDate) {
                  this.renderTable(`商户统计 (${this.currentReportDate})`, []);
                  return;
             }
-            const selectedStatuses = Array.from(document.querySelectorAll('#status-filter-group input:checked')).map(cb => this.STATUS_MAP[cb.dataset.status]);
+            const selectedStatuses = Array.from(document.querySelectorAll('[data-status]:checked')).map(cb => this.STATUS_MAP[cb.dataset.status]);
             let dataToDisplay = this.masterResultData.filter(row => selectedStatuses.includes(row['账户状态']));
             if (document.getElementById('filter-active-merchants').checked) {
                 dataToDisplay = dataToDisplay.filter(row => row['代收成功(笔)'] > 0 || row['代付成功(笔)'] > 0);
