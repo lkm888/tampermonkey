@@ -1,10 +1,9 @@
-
 // ==UserScript==
-// @name         GDS 交易列表集成版 (v1.4.19 - 日志分面板与导出 - 增扣钱) 
+// @name         GDS 交易列表集成版 (v1.5.1 - 补单优化)
 // @namespace    http://tampermonkey.net/
-// @version      1.4.19fix
-// @description  在GDS页面内嵌交易列表。打款金额不能超过订单金额。Bank列匹配GDS账户。新增受益人选择，打款后按钮1分钟节流。金额无逗号。增加删除交易记录功能。使用IndexedDB存储数据，从GDS_EnhancedScriptDB/accountData按指定键读取账户缓存。操作日志现分面板显示、可搜索、清除和导出。新增“扣钱”按钮，将打款金额从订单金额中扣除并更新到本地。(v1.4.18: 日志分面板管理，各自支持清除、导出、搜索过滤).
-// @match        https://admin.gdspay.xyz/222*
+// @version      1.5.1
+// @description  在GDS页面内嵌交易列表。打款金额不能超过订单金额。Bank列匹配GDS账户。新增受益人选择，打款后按钮1分钟节流。金额无逗号。增加删除交易记录功能。使用IndexedDB存储数据，从GDS_EnhancedScriptDB/accountData按指定键读取账户缓存。操作日志现分面板显示、可搜索、清除和导出。新增“扣钱”按钮，将打款金额从订单金额中扣除并更新到本地。(v1.5.1: 优化补单面板，保持选择并移除补录确认框).
+// @match        https://admin.gdspay.xyz/2*
 // @grant        GM_xmlhttpRequest
 // @updateURL    https://raw.githubusercontent.com/lkm888/tampermonkey/main/交易.user.js
 // @downloadURL  https://raw.githubusercontent.com/lkm888/tampermonkey/main/交易.user.js
@@ -23,6 +22,10 @@
   const BANK_BENEFICIARIES_URL = 'http://127.0.0.1:5000/bank_beneficiaries';
   const GDS_BENEFICIARY_LIST_API_URL = 'https://admin.gdspay.xyz/api/tripartite/v1/beneficiary/list';
   const BANK_BENEFICIARIES_BULK_ADD_URL = 'http://127.0.0.1:5000/bank_beneficiaries/bulk_add';
+  // 新增补单API
+  const GDS_PAYEE_MODIFY_API_URL = 'https://admin.gdspay.xyz/api/tripartite/v1/payee/modify';
+  const GDS_MAKEUP_TRANSFER_API_URL = 'https://admin.gdspay.xyz/api/tripartite/v1/transfer/makeup';
+
 
   // ---- IndexedDB 配置 (此脚本数据) ----
   const EMBED_TX_DB_NAME = 'GDSEmbeddedTxDB';
@@ -38,6 +41,7 @@
   // ---- 用于此脚本 IndexedDB 存储的键 ----
   const KEY_PERSISTENT_OPERATION_LOGS_TX = 'gds_persistent_operation_logs_tx'; // 交易面板日志
   const KEY_PERSISTENT_OPERATION_LOGS_BB = 'gds_persistent_operation_logs_bb'; // 银行受益人面板日志
+  const KEY_PERSISTENT_OPERATION_LOGS_MU = 'gds_persistent_operation_logs_mu'; // 补单面板日志
   const KEY_THEME_PREFERENCE = 'gds_theme_preference';
   const KEY_COLUMN_VISIBILITY_TX = 'gds_column_visibility_tx';
   const KEY_SORT_CONFIG_TX = 'gds_sort_config_tx';
@@ -57,34 +61,42 @@
     { name: 'NEFT', value: 2 },
     { name: 'RTGS', value: 3 },
   ];
+  const GDS_PAYOUT_TYPES = [
+    { name: '承兑', value: 5 },
+    { name: '四方内充', value: 4 },
+    { name: '佣金打款', value: 6 },
+    { name: '中转', value: 3 },
+  ];
   const DEFAULT_GDS_TRANSFER_MODE = 2;
   const PAYOUT_THROTTLE_DURATION_MS = 60 * 1000; // 1分钟
   const ADMIN_PASSWORD_FOR_BULK_ADD = '1'; // 本地Flask API 的固定管理密码
-  const DEBOUNCE_DELAY_MS = 300; // 新增：金额输入防抖延迟 (毫秒)
+  const DEBOUNCE_DELAY_MS = 300; // 金额输入防抖延迟 (毫秒)
 
   // ---- 全局变量 ----
   let transactionDataCache = [];
   let bankBeneficiaryDataCache = [];
   let gdsAccountDataCache = {};
+  let makeupAnalysisResult = null; // 存储补单分析结果
 
-  let transactionPanelLogs = []; // 交易面板特定日志
-  let bankBeneficiaryPanelLogs = []; // 银行受益人面板特定日志
-  let currentLogDisplayType = 'transaction'; // 当前显示的日志类型: 'transaction' 或 'bankBeneficiary'
+  let transactionPanelLogs = [];
+  let bankBeneficiaryPanelLogs = [];
+  let makeupPanelLogs = []; // 补单面板日志
+  let currentLogDisplayType = 'transaction'; // 'transaction', 'bankBeneficiary', 'makeup'
 
   let refreshIntervalId = null;
   let currentTheme = 'light';
-  let columnVisibilityTx = {}; // 交易表格列可见性
-  let bankBeneficiaryColumnVisibility = {}; // 银行受益人表格列可见性
-  let sortConfigTx = { key: null, direction: 'asc' }; // 交易表格排序配置
-  let bankBeneficiarySortConfig = { key: null, direction: 'asc' }; // 银行受益人表格排序配置
-  let lastSuccessfulDataTimestamp = null; // 交易表格上次成功刷新时间
-  let lastSuccessfulBankBeneTimestamp = null; // 银行受益人表格上次成功刷新时间
-  let currentActiveSubPanel = 'transaction'; // 当前活跃的子面板
-  let hasFetchedInitialData = false; // 是否已首次获取数据
+  let columnVisibilityTx = {};
+  let bankBeneficiaryColumnVisibility = {};
+  let sortConfigTx = { key: null, direction: 'asc' };
+  let bankBeneficiarySortConfig = { key: null, direction: 'asc' };
+  let lastSuccessfulDataTimestamp = null;
+  let lastSuccessfulBankBeneTimestamp = null;
+  let currentActiveSubPanel = 'transaction';
+  let hasFetchedInitialData = false;
 
-  let payoutThrottleTimestamps = {}; // 打款节流时间戳
-  let bankBeneSelectedAccountId = null; // 银行受益人面板选中的GDS账户ID
-  const transferAmountDebounceTimers = {}; // 新增：用于存储金额输入防抖定时器
+  let payoutThrottleTimestamps = {};
+  let bankBeneSelectedAccountId = null;
+  const transferAmountDebounceTimers = {};
 
   // ---- IndexedDB 辅助函数 ----
   const idbHelper = (dbName, version, storeConfigs) => {
@@ -149,6 +161,8 @@
       --panel-switcher-btn-active-border: #a0a0a0;
       --sync-button-bg: #6c757d; --sync-button-hover-bg: #5a6268;
       --export-button-bg: #17a2b8; --export-button-hover-bg: #138496;
+      --makeup-record-button-bg: #28a745; --makeup-record-button-hover-bg: #218838;
+      --analysis-result-bg: #f8f9fa; --analysis-result-border: #dee2e6;
     }
     body.dark-theme {
       --body-bg: #22272e; --text-color: #c9d1d9; --text-muted-color: #8b949e; --link-color: #58a6ff;
@@ -176,9 +190,11 @@
       --panel-switcher-btn-active-border: #545d68;
       --sync-button-bg: #8b949e; --sync-button-hover-bg: #6c757d;
       --export-button-bg: #007bff; --export-button-hover-bg: #0056b3;
+      --makeup-record-button-bg: #3fb950; --makeup-record-button-hover-bg: #2ea043;
+      --analysis-result-bg: #2d333b; --analysis-result-border: #444c56;
     }
     body { background-color: var(--body-bg); color: var(--text-color); transition: background-color 0.3s, color 0.3s; }
-    input, select, button { color: var(--input-text); background-color: var(--input-bg); border: 1px solid var(--input-border); padding: 4px 6px; border-radius: 3px; }
+    input, select, button, textarea { color: var(--input-text); background-color: var(--input-bg); border: 1px solid var(--input-border); padding: 4px 6px; border-radius: 3px; }
     select option { background-color: var(--input-bg); color: var(--input-text); }
     body.dark-theme select option { background-color: var(--input-bg) !important; color: var(--input-text) !important; }
     .input-invalid { border-color: var(--input-invalid-border-color) !important; box-shadow: 0 0 0 0.2rem color-mix(in srgb, var(--input-invalid-border-color) 40%, transparent); }
@@ -212,19 +228,19 @@
         font-weight: bold;
     }
 
-    /* 包含两个主面板的内容区域 */
+    /* 包含三个主面板的内容区域 */
     #panel-content-area {
         display: flex; flex-direction: row; gap: 10px; flex-grow: 1; overflow: hidden; min-height: 200px;
     }
 
     /* 各个子面板样式 */
-    #transaction-panel-content, #bank-beneficiary-panel {
+    #transaction-panel-content, #bank-beneficiary-panel, #makeup-panel {
         display: none; /* 默认隐藏，JS控制显示 */
         flex-direction: column; flex-grow: 1; flex-shrink: 1; border: 1px solid var(--panel-border);
         box-shadow: 0 2px 5px var(--panel-shadow); background-color: var(--body-bg); padding: 8px;
         max-height: 100%; overflow: hidden; min-width: 400px;
     }
-    #transaction-panel-content.active-panel, #bank-beneficiary-panel.active-panel { display: flex; }
+    #transaction-panel-content.active-panel, #bank-beneficiary-panel.active-panel, #makeup-panel.active-panel { display: flex; }
 
     /* 子面板内控制区和列切换区公共样式 */
     .panel-control-area, .column-toggle-panel {
@@ -232,7 +248,17 @@
         background: var(--panel-bg); padding: 6px 10px; border: 1px solid var(--panel-border);
         box-shadow: 0 1px 3px rgba(0,0,0,0.08); margin-bottom: 5px; flex-shrink: 0;
     }
-    .panel-control-area input, .panel-control-area button, .panel-control-area select { padding: 2px 4px; font-size:12px; }
+    .panel-control-area input, .panel-control-area button, .panel-control-area select, .panel-control-area textarea { padding: 2px 4px; font-size:12px; }
+
+    /* 补单面板特定样式 */
+    #makeup-panel-content { display: flex; flex-direction: row; gap: 10px; flex-grow: 1; overflow: auto; }
+    #makeup-input-area { flex: 1; display: flex; flex-direction: column; gap: 8px; min-width: 300px; }
+    #makeup-recipient-info { width: 100%; height: 120px; resize: vertical; font-family: monospace; }
+    #makeup-analysis-result { flex: 1; background-color: var(--analysis-result-bg); border: 1px solid var(--analysis-result-border); padding: 10px; white-space: pre-wrap; font-family: monospace; overflow-y: auto; min-width: 300px; }
+    #makeup-record-btn { background-color: var(--makeup-record-button-bg); color: white; }
+    #makeup-record-btn:hover { background-color: var(--makeup-record-button-hover-bg); }
+    body.dark-theme #makeup-record-btn { color: var(--body-bg); }
+    #makeup-log-controls { margin-top: auto; padding-top: 10px; flex-shrink: 0; display:flex; gap: 8px;}
 
     /* 表格容器样式 */
     .table-container {
@@ -272,9 +298,9 @@
     .export-log-button { background-color: var(--export-button-bg); color: white; } .export-log-button:hover { background-color: var(--export-button-hover-bg); } body.dark-theme .export-log-button { color: var(--body-bg); }
 
     /* 日志颜色 */
-    .log-transfer-attempt, .log-add-beneficiary-attempt, .log-sync-beneficiary-attempt { color: var(--log-attempt-color); }
-    .log-transfer-success, .log-add-beneficiary-success, .log-sync-beneficiary-success { color: var(--log-success-color); }
-    .log-transfer-fail, .log-add-beneficiary-fail, .log-sync-beneficiary-fail { color: var(--log-fail-color); }
+    .log-transfer-attempt, .log-add-beneficiary-attempt, .log-sync-beneficiary-attempt, .log-makeup-attempt { color: var(--log-attempt-color); }
+    .log-transfer-success, .log-add-beneficiary-success, .log-sync-beneficiary-success, .log-makeup-success { color: var(--log-success-color); }
+    .log-transfer-fail, .log-add-beneficiary-fail, .log-sync-beneficiary-fail, .log-makeup-fail { color: var(--log-fail-color); }
     .log-info { color: var(--log-info-color); } .log-warn { color: var(--log-warn-color); } .log-error { color: var(--log-error-color); }
 
     /* 提示框和获取状态 */
@@ -304,6 +330,7 @@
   const panelSwitcher = createEl('div', 'panel-switcher', null, `
     <button id="show-transaction-panel-btn" class="active">交易面板</button>
     <button id="show-bank-beneficiary-panel-btn">银行受益人</button>
+    <button id="show-makeup-panel-btn">补单</button>
   `);
   embedTxPanel.appendChild(panelSwitcher);
 
@@ -339,6 +366,31 @@
     <div id="bank-beneficiary-table-container" class="table-container">加载中...</div>
   `);
   panelContentArea.appendChild(bankBeneficiaryPanel);
+
+  // 新增：补单面板
+  const makeupPanel = createEl('div', 'makeup-panel', null, `
+    <div id="makeup-panel-control" class="panel-control-area">
+      <span>补单工具</span>
+    </div>
+    <div id="makeup-panel-content">
+      <div id="makeup-input-area">
+        <label>打款账户: <select id="makeup-account-selector" style="width:100%;"><option value="">--选择打款账户--</option></select></label>
+        <label>账户类型: <select id="makeup-payout-type-selector" style="width:100%;"></select></label>
+        <label>转账模式: <select id="makeup-transfer-mode-selector" style="width:100%;"></select></label>
+        <label>收款信息 (Name, Acc, IFSC, 金额, UTR): <textarea id="makeup-recipient-info" placeholder="请用 Tab, | 或换行分隔"></textarea></label>
+        <div style="display:flex; gap: 10px;">
+           <button id="makeup-analyze-btn" class="action-button" style="flex:1;">分析</button>
+           <button id="makeup-record-btn" class="action-button" style="flex:1;" disabled>补录</button>
+        </div>
+        <div id="makeup-log-controls">
+            <button id="embed-tx-clear-mu-log">清日志</button>
+            <button id="embed-tx-export-mu-log" class="export-log-button">导出日志</button>
+        </div>
+      </div>
+      <div id="makeup-analysis-result">请先点击“分析”按钮...</div>
+    </div>
+  `);
+  panelContentArea.appendChild(makeupPanel);
 
   const logDisplayContainer = createEl('div', 'embed-tx-log-container', null, '<span class="log-title">操作日志</span>');
   embedTxPanel.appendChild(logDisplayContainer);
@@ -383,14 +435,6 @@
   function formatAmount(amount) { const num = parseFloat(amount); return isNaN(num) ? String(amount) : num.toFixed(2).replace(/\.00$/, ''); }
   function formatDateTime(dateInput = new Date()) { const d = (dateInput instanceof Date) ? dateInput : new Date(dateInput); if (isNaN(d.getTime())) return '无效日期'; return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}`; }
 
-  /**
-   * 封装 GM_xmlhttpRequest 为 Promise 形式
-   * @param {string} method HTTP 方法
-   * @param {string} url 请求 URL
-   * @param {object} headers 请求头
-   * @param {string|object|URLSearchParams|FormData} data 请求体
-   * @returns {Promise<object>} 包含 status, responseText, response 等的响应对象
-   */
   async function gmFetch(method, url, headers = {}, data = null) {
     return new Promise((resolve, reject) => {
       GM_xmlhttpRequest({
@@ -411,6 +455,7 @@
 
     if (panelType === 'transaction') { targetLogs = transactionPanelLogs; dbKey = KEY_PERSISTENT_OPERATION_LOGS_TX; }
     else if (panelType === 'bankBeneficiary') { targetLogs = bankBeneficiaryPanelLogs; dbKey = KEY_PERSISTENT_OPERATION_LOGS_BB; }
+    else if (panelType === 'makeup') { targetLogs = makeupPanelLogs; dbKey = KEY_PERSISTENT_OPERATION_LOGS_MU; }
     else { console.warn("addLogEntry: 无效的面板类型:", panelType); return; }
 
     targetLogs.unshift(logEntry);
@@ -440,6 +485,7 @@
 
     if (currentLogDisplayType === 'transaction') { logsToDisplay = transactionPanelLogs; searchInput = document.getElementById('embed-tx-search'); logTitle = '交易面板操作日志'; }
     else if (currentLogDisplayType === 'bankBeneficiary') { logsToDisplay = bankBeneficiaryPanelLogs; searchInput = document.getElementById('bank-beneficiary-search'); logTitle = '银行受益人操作日志'; }
+    else if (currentLogDisplayType === 'makeup') { logsToDisplay = makeupPanelLogs; searchInput = null; logTitle = '补单面板操作日志'; } // 补单面板无搜索框
 
     const searchFilter = searchInput ? searchInput.value.toLowerCase().trim() : '';
     const keywords = searchFilter ? searchFilter.split(/\s+/).filter(Boolean) : [];
@@ -448,7 +494,7 @@
 
     logsToDisplay.forEach(log => {
       const logText = `${log.time} ${log.message}`.toLowerCase();
-      const shouldDisplay = keywords.every(k => logText.includes(k));
+      const shouldDisplay = keywords.length === 0 || keywords.every(k => logText.includes(k));
       if (shouldDisplay) {
         const el = createEl('div', null, 'log-entry');
         el.innerHTML = `<span class="log-time">[${escapeHtml(log.time)}]</span> ${log.message}`;
@@ -458,12 +504,22 @@
   }
 
   async function clearLogs(panelType) {
-    if (!confirm(`确定清空 ${panelType === 'transaction' ? '交易面板' : '银行受益人面板'} 的操作日志?`)) {
+    let panelName = '';
+    if (panelType === 'transaction') panelName = '交易面板';
+    else if (panelType === 'bankBeneficiary') panelName = '银行受益人面板';
+    else if (panelType === 'makeup') panelName = '补单面板';
+    else return;
+
+    if (!confirm(`确定清空 ${panelName} 的操作日志?`)) {
       await addLogEntry({ message: `<span class="log-info">取消清空日志 (${panelType}).</span>` }, false, panelType);
       return;
     }
-    const targetLogs = (panelType === 'transaction') ? transactionPanelLogs : bankBeneficiaryPanelLogs;
-    const dbKey = (panelType === 'transaction') ? KEY_PERSISTENT_OPERATION_LOGS_TX : KEY_PERSISTENT_OPERATION_LOGS_BB;
+
+    let targetLogs, dbKey;
+    if (panelType === 'transaction') { targetLogs = transactionPanelLogs; dbKey = KEY_PERSISTENT_OPERATION_LOGS_TX; }
+    else if (panelType === 'bankBeneficiary') { targetLogs = bankBeneficiaryPanelLogs; dbKey = KEY_PERSISTENT_OPERATION_LOGS_BB; }
+    else if (panelType === 'makeup') { targetLogs = makeupPanelLogs; dbKey = KEY_PERSISTENT_OPERATION_LOGS_MU; }
+
     targetLogs.length = 0;
     try {
       await embedTxDb.remove(EMBED_TX_STORE_NAME, dbKey);
@@ -476,16 +532,21 @@
   }
 
   function exportLogs(panelType) {
-    let logsToExport = (panelType === 'transaction') ? transactionPanelLogs : bankBeneficiaryPanelLogs;
-    let filenamePrefix = (panelType === 'transaction') ? 'transaction_logs' : 'bank_beneficiary_logs';
-    const searchInput = (panelType === 'transaction') ? document.getElementById('embed-tx-search') : document.getElementById('bank-beneficiary-search');
+    let logsToExport, filenamePrefix, searchInput;
+
+    if (panelType === 'transaction') { logsToExport = transactionPanelLogs; filenamePrefix = 'transaction_logs'; searchInput = document.getElementById('embed-tx-search'); }
+    else if (panelType === 'bankBeneficiary') { logsToExport = bankBeneficiaryPanelLogs; filenamePrefix = 'bank_beneficiary_logs'; searchInput = document.getElementById('bank-beneficiary-search'); }
+    else if (panelType === 'makeup') { logsToExport = makeupPanelLogs; filenamePrefix = 'makeup_logs'; searchInput = null; }
+    else return;
 
     const searchFilter = searchInput ? searchInput.value.toLowerCase().trim() : '';
     const keywords = searchFilter ? searchFilter.split(/\s+/).filter(Boolean) : [];
-    const filteredLogs = logsToExport.filter(log => {
-      const logText = `${log.time} ${log.message}`.toLowerCase();
-      return keywords.every(k => logText.includes(k));
-    });
+    const filteredLogs = keywords.length > 0
+        ? logsToExport.filter(log => {
+            const logText = `${log.time} ${log.message}`.toLowerCase();
+            return keywords.every(k => logText.includes(k));
+          })
+        : logsToExport;
 
     const logContent = filteredLogs.map(log => `[${log.time}] ${log.message.replace(/<[^>]*>?/gm, '')}`).join('\n');
     const blob = new Blob([logContent], { type: 'text/plain;charset=utf-8' });
@@ -561,13 +622,17 @@
   async function showSubPanel(panelType) {
     const transactionPanel = document.getElementById('transaction-panel-content');
     const bankBeneficiaryPanel = document.getElementById('bank-beneficiary-panel');
+    const makeupPanel = document.getElementById('makeup-panel');
     const txBtn = document.getElementById('show-transaction-panel-btn');
     const bbBtn = document.getElementById('show-bank-beneficiary-panel-btn');
+    const muBtn = document.getElementById('show-makeup-panel-btn');
 
     transactionPanel.classList.remove('active-panel');
     bankBeneficiaryPanel.classList.remove('active-panel');
+    makeupPanel.classList.remove('active-panel');
     txBtn.classList.remove('active');
     bbBtn.classList.remove('active');
+    muBtn.classList.remove('active');
 
     if (panelType === 'transaction') {
         transactionPanel.classList.add('active-panel');
@@ -576,14 +641,19 @@
         bankBeneficiaryPanel.classList.add('active-panel');
         bbBtn.classList.add('active');
         populateBankBeneAccountSelector();
+    } else if (panelType === 'makeup') {
+        makeupPanel.classList.add('active-panel');
+        muBtn.classList.add('active');
+        populateMakeupPanelSelectors();
     }
+
     currentActiveSubPanel = panelType;
     await savePreference(KEY_ACTIVE_SUBPANEL_PREFERENCE, currentActiveSubPanel);
 
     currentLogDisplayType = panelType;
     renderLogs();
-    renderTable(); // 重新渲染交易表格以确保可见性
-    renderBankBeneficiaryTable(); // 重新渲染受益人表格以确保可见性
+    renderTable(); // 确保可见性
+    renderBankBeneficiaryTable(); // 确保可见性
   }
 
   // --- 打款节流逻辑 ---
@@ -955,51 +1025,47 @@
   }
 
   async function handleTransferAmountChange(event) {
-  const input = event.target;
-  const id = input.closest('tr').dataset.entryId;
-  const tx = transactionDataCache.find(t => t.entryId === id);
-  if (!tx) return;
+    const input = event.target;
+    const id = input.closest('tr').dataset.entryId;
+    const tx = transactionDataCache.find(t => t.entryId === id);
+    if (!tx) return;
 
-  // 1. 立即更新输入框的验证状态 (不需要防抖，提供即时视觉反馈)
-  let currentInputValue = parseFloat(input.value);
-  input.classList.toggle('input-invalid', !isNaN(currentInputValue) && currentInputValue > tx.txAmount);
+    let currentInputValue = parseFloat(input.value);
+    input.classList.toggle('input-invalid', !isNaN(currentInputValue) && currentInputValue > tx.txAmount);
 
-  // 2. 清除该交易ID的旧定时器
-  if (transferAmountDebounceTimers[id]) {
-    clearTimeout(transferAmountDebounceTimers[id]);
-  }
+    if (transferAmountDebounceTimers[id]) {
+      clearTimeout(transferAmountDebounceTimers[id]);
+    }
 
-  // 3. 设置新定时器，在延迟后执行实际的金额处理逻辑
-  transferAmountDebounceTimers[id] = setTimeout(async () => {
-    let amount = parseFloat(input.value);
-    const oldAmount = tx.transferAmount;
-    let clamped = false;
+    transferAmountDebounceTimers[id] = setTimeout(async () => {
+      let amount = parseFloat(input.value);
+      const oldAmount = tx.transferAmount;
+      let clamped = false;
 
-    if (isNaN(amount) || amount < 0) {
-      tx.transferAmount = null;
-    } else {
-      if (amount > tx.txAmount) {
-        amount = tx.txAmount;
-        input.value = formatAmount(amount); // 更新输入框显示为修正后的值
-        clamped = true;
-        showToast('打款金额已自动修正为订单金额', event, 1500); // 这里的event可能不是原始的input event，可能需要调整toast的位置
+      if (isNaN(amount) || amount < 0) {
+        tx.transferAmount = null;
+      } else {
+        if (amount > tx.txAmount) {
+          amount = tx.txAmount;
+          input.value = formatAmount(amount);
+          clamped = true;
+          showToast('打款金额已自动修正为订单金额', event, 1500);
+        }
+        tx.transferAmount = parseFloat(amount.toFixed(2));
       }
-      tx.transferAmount = parseFloat(amount.toFixed(2));
-    }
 
-    // 重新检查并更新输入框的验证状态 (再次确认，确保最终状态正确)
-    input.classList.toggle('input-invalid', tx.transferAmount !== null && tx.transferAmount > tx.txAmount);
+      input.classList.toggle('input-invalid', tx.transferAmount !== null && tx.transferAmount > tx.txAmount);
 
-    if (oldAmount !== tx.transferAmount || clamped) {
-      let logMessage = `<span class="log-info">E${escapeHtml(id.substring(0,5))}: 打款金额->${tx.transferAmount===null?'N/A':formatAmount(tx.transferAmount)}`;
-      if (clamped) logMessage += ' (已修正为订单金额)';
-      else if (tx.transferAmount !== null && tx.transferAmount > tx.txAmount) logMessage += ' (超订单金额!)';
-      logMessage += '.</span>';
-      await addLogEntry({message: logMessage}, false, 'transaction');
-    }
-    updateRowState(input.closest('tr'), tx);
-  }, DEBOUNCE_DELAY_MS);
-}
+      if (oldAmount !== tx.transferAmount || clamped) {
+        let logMessage = `<span class="log-info">E${escapeHtml(id.substring(0,5))}: 打款金额->${tx.transferAmount===null?'N/A':formatAmount(tx.transferAmount)}`;
+        if (clamped) logMessage += ' (已修正为订单金额)';
+        else if (tx.transferAmount !== null && tx.transferAmount > tx.txAmount) logMessage += ' (超订单金额!)';
+        logMessage += '.</span>';
+        await addLogEntry({message: logMessage}, false, 'transaction');
+      }
+      updateRowState(input.closest('tr'), tx);
+    }, DEBOUNCE_DELAY_MS);
+  }
 
   async function handleTransferModeChange(event) {
     const sel = event.target;
@@ -1494,15 +1560,231 @@
     }
   }
 
+  // --- 补单面板函数 ---
+  // MODIFIED: 增加了保持选择的功能
+  function populateMakeupPanelSelectors() {
+    const accountSelector = document.getElementById('makeup-account-selector');
+    const payoutTypeSelector = document.getElementById('makeup-payout-type-selector');
+    const transferModeSelector = document.getElementById('makeup-transfer-mode-selector');
+
+    if (!accountSelector || !payoutTypeSelector || !transferModeSelector) return;
+
+    // 保存当前选择
+    const currentAccountId = accountSelector.value;
+    const currentTypeId = payoutTypeSelector.value;
+    const currentModeId = transferModeSelector.value;
+
+    // 填充打款账户
+    let accOpts = '<option value="">--选择打款账户--</option>';
+    const allAccounts = Object.values(gdsAccountDataCache).filter(c => c?.current?.accountName && c.current.platform);
+    if (allAccounts.length > 0) {
+        allAccounts.sort((a, b) => String(a.current.accountName).localeCompare(String(b.current.accountName)))
+            .forEach(a => {
+                const acc = a.current;
+                const statusText = acc.status !== '已消失' ? '' : ' (已消失)';
+                accOpts += `<option value="${escapeHtml(String(acc.id))}">${escapeHtml(acc.accountName)}${statusText}</option>`;
+            });
+    } else {
+        accOpts += '<option value="" disabled>无可用账户</option>';
+    }
+    accountSelector.innerHTML = accOpts;
+
+    // 填充账户类型
+    payoutTypeSelector.innerHTML = GDS_PAYOUT_TYPES.map(t => `<option value="${t.value}">${escapeHtml(t.name)}</option>`).join('');
+
+    // 填充转账模式
+    transferModeSelector.innerHTML = GDS_TRANSFER_MODES.map(m => `<option value="${m.value}">${escapeHtml(m.name)}</option>`).join('');
+
+    // 恢复之前的选择
+    accountSelector.value = currentAccountId;
+    payoutTypeSelector.value = currentTypeId;
+    transferModeSelector.value = currentModeId;
+  }
+
+  async function handleAnalyzeButtonClick() {
+    const accountId = document.getElementById('makeup-account-selector').value;
+    const payoutTypeId = document.getElementById('makeup-payout-type-selector').value;
+    const transferModeId = document.getElementById('makeup-transfer-mode-selector').value;
+    const recipientInfoText = document.getElementById('makeup-recipient-info').value;
+    const resultDiv = document.getElementById('makeup-analysis-result');
+    const recordBtn = document.getElementById('makeup-record-btn');
+
+    recordBtn.disabled = true;
+    makeupAnalysisResult = null;
+
+    if (!accountId) {
+        resultDiv.textContent = '错误：请选择一个打款账户。';
+        await addLogEntry({ message: `<span class="log-warn">补单分析失败：未选择打款账户。</span>` }, false, 'makeup');
+        return;
+    }
+
+    const recipientData = recipientInfoText.split(/[\t\n|]+/).map(s => s.trim()).filter(Boolean);
+    if (recipientData.length !== 5) {
+        resultDiv.textContent = `错误：收款信息需要包含 5 项 (Name, Acc, IFSC, 金额, UTR)，当前检测到 ${recipientData.length} 项。`;
+        await addLogEntry({ message: `<span class="log-warn">补单分析失败：收款信息项数不符。</span>` }, false, 'makeup');
+        return;
+    }
+
+    const [name, accNumber, ifsc, amountStr, utr] = recipientData;
+    const amount = parseFloat(amountStr);
+
+    if (isNaN(amount) || amount <= 0) {
+        resultDiv.textContent = `错误：无效的金额 "${escapeHtml(amountStr)}"。`;
+        await addLogEntry({ message: `<span class="log-warn">补单分析失败：无效金额。</span>` }, false, 'makeup');
+        return;
+    }
+
+    const account = gdsAccountDataCache[accountId]?.current;
+    if (!account) {
+        resultDiv.textContent = '错误：选择的打款账户信息未找到。';
+        await addLogEntry({ message: `<span class="log-warn">补单分析失败：账户信息未找到。</span>` }, false, 'makeup');
+        return;
+    }
+    const payoutType = GDS_PAYOUT_TYPES.find(t => String(t.value) === payoutTypeId);
+    const transferMode = GDS_TRANSFER_MODES.find(t => String(t.value) === transferModeId);
+
+    makeupAnalysisResult = {
+        account,
+        payoutType,
+        transferMode,
+        recipient: { name, accNumber, ifsc, amount, utr }
+    };
+
+    const displayText = `
+请核对以下补单信息：
+---------------------------------
+【打款账户】
+  - 账户名: ${escapeHtml(account.accountName)}
+  - 平台ID: ${escapeHtml(account.platform)}
+  - 状态: ${escapeHtml(account.status || '正常')}
+
+【收款信息】
+  - 收款人: ${escapeHtml(name)}
+  - 卡号: ${escapeHtml(accNumber)}
+  - IFSC: ${escapeHtml(ifsc)}
+  - 金额: ${formatAmount(amount)}
+  - UTR/备注: ${escapeHtml(utr)}
+
+【交易参数】
+  - 账户类型: ${escapeHtml(payoutType.name)} (${payoutType.value})
+  - 转账模式: ${escapeHtml(transferMode.name)} (${transferMode.value})
+---------------------------------
+确认无误后，请点击“补录”按钮。
+    `;
+    resultDiv.innerHTML = `<pre>${displayText}</pre>`;
+    recordBtn.disabled = false;
+    await addLogEntry({ message: `<span class="log-info">补单信息分析成功，待确认。</span>` }, false, 'makeup');
+  }
+
+  // MODIFIED: 移除了 confirm 对话框
+  async function handleMakeupRecordButtonClick() {
+    if (!makeupAnalysisResult) {
+        showToast('无有效的分析结果，请先点击分析。');
+        return;
+    }
+
+    await addLogEntry({ message: `<span class="log-warn"><strong>开始执行补录操作 (无确认对话框).</strong></span>` }, true, 'makeup');
+
+    const analyzeBtn = document.getElementById('makeup-analyze-btn');
+    const recordBtn = document.getElementById('makeup-record-btn');
+    analyzeBtn.disabled = true;
+    recordBtn.disabled = true;
+    recordBtn.textContent = '补录中...';
+
+    const token = localStorage.getItem('token');
+    if (!token) {
+        showToast('Token未找到，无法操作');
+        await addLogEntry({ message: `<span class="log-error log-makeup-fail">补单失败: Token 未找到。</span>` }, true, 'makeup');
+        analyzeBtn.disabled = false; recordBtn.disabled = false; recordBtn.textContent = '补录';
+        return;
+    }
+
+    const { account, payoutType, transferMode, recipient } = makeupAnalysisResult;
+    let payeeIdToDelete = null;
+
+    try {
+        // --- 步骤 1: 创建临时受益人 ---
+        showFetchStatus('步骤 1/4: 创建临时受益人...', 'info', 0);
+        await addLogEntry({ message: `<span class="log-makeup-attempt">1. 尝试创建受益人: ${escapeHtml(recipient.name)} / ${escapeHtml(recipient.accNumber)}</span>` }, true, 'makeup');
+        const createPayeePayload = {
+            payeeId: 0, status: 2, currency: "INR", wayCode: 1,
+            name: recipient.name, accountNo: recipient.accNumber, bankCode: recipient.ifsc,
+            bankName: recipient.ifsc.substring(0, 4), phone: "1", email: "b@a.cc",
+            payoutType: payoutType.value, operate: "CREATE"
+        };
+        const createResp = await gmFetch("POST", GDS_PAYEE_MODIFY_API_URL, { "Authorization": token, "Content-Type": "application/json" }, JSON.stringify(createPayeePayload));
+        const createRes = JSON.parse(createResp.responseText);
+        if (createRes.code !== 1) throw new Error(`创建受益人失败: ${createRes.msg || '未知错误'}`);
+        await addLogEntry({ message: `<span class="log-makeup-success">1. 创建受益人成功.</span>` }, true, 'makeup');
+
+        // --- 步骤 2: 获取受益人ID ---
+        showFetchStatus('步骤 2/4: 查询受益人ID...', 'info', 0);
+        await addLogEntry({ message: `<span class="log-makeup-attempt">2. 尝试查询受益人ID...</span>` }, true, 'makeup');
+        const listUrl = GDS_PAYEE_LIST_API_URL_TEMPLATE.replace('{ACCOUNT_NO}', encodeURIComponent(recipient.accNumber));
+        const listResp = await gmFetch("GET", listUrl, { "Authorization": token, "Cache-Control": "no-cache" });
+        const listRes = JSON.parse(listResp.responseText);
+        if (listRes.code !== 1 || !listRes.data?.list || listRes.data.list.length === 0) throw new Error(`查询受益人ID失败: ${listRes.msg || '未找到记录'}`);
+        payeeIdToDelete = listRes.data.list[0].payeeId;
+        await addLogEntry({ message: `<span class="log-makeup-success">2. 获取受益人ID成功: ${payeeIdToDelete}.</span>` }, true, 'makeup');
+
+        // --- 步骤 3: 执行补单 ---
+        showFetchStatus('步骤 3/4: 执行补单交易...', 'info', 0);
+        await addLogEntry({ message: `<span class="log-makeup-attempt">3. 尝试补单: ${formatAmount(recipient.amount)} -> ${escapeHtml(recipient.name)}</span>` }, true, 'makeup');
+        const makeupPayload = {
+            tripartiteId: account.platform,
+            accountName: account.accountName,
+            payeeId: payeeIdToDelete,
+            amount: Math.floor(recipient.amount * 100),
+            transferMode: transferMode.value,
+            assignReferenceNo: recipient.utr,
+            version: Date.now()
+        };
+        const makeupResp = await gmFetch("POST", GDS_MAKEUP_TRANSFER_API_URL, { "Authorization": token, "Content-Type": "application/json" }, JSON.stringify(makeupPayload));
+        const makeupRes = JSON.parse(makeupResp.responseText);
+        if (makeupRes.code !== 1) throw new Error(`补单失败: ${makeupRes.msg || '未知错误'}`);
+        await addLogEntry({ message: `<span class="log-makeup-success">3. 补单交易成功.</span>` }, true, 'makeup');
+
+        showFetchStatus('补单流程成功！', 'success', 5000);
+        await addLogEntry({ message: `<span class="log-makeup-success"><strong>整个补单流程成功完成！</strong></span>` }, true, 'makeup');
+
+    } catch (error) {
+        showFetchStatus(`补单流程失败: ${error.message}`, 'error', 10000);
+        await addLogEntry({ message: `<span class="log-error log-makeup-fail">补单流程失败: ${escapeHtml(error.message)}</span>` }, true, 'makeup');
+    } finally {
+        // --- 步骤 4: 删除临时受益人 (无论成功失败都执行) ---
+        if (payeeIdToDelete) {
+            showFetchStatus('步骤 4/4: 清理临时受益人...', 'info', 5000);
+            await addLogEntry({ message: `<span class="log-makeup-attempt">4. 尝试删除临时受益人ID: ${payeeIdToDelete}</span>` }, true, 'makeup');
+            try {
+                const deletePayload = { payeeId: payeeIdToDelete, operate: "REMOVE" };
+                const deleteResp = await gmFetch("POST", GDS_PAYEE_MODIFY_API_URL, { "Authorization": token, "Content-Type": "application/json" }, JSON.stringify(deletePayload));
+                const deleteRes = JSON.parse(deleteResp.responseText);
+                if (deleteRes.code === 1) {
+                    await addLogEntry({ message: `<span class="log-makeup-success">4. 删除临时受益人成功.</span>` }, true, 'makeup');
+                } else {
+                    await addLogEntry({ message: `<span class="log-warn">4. 删除临时受益人失败: ${deleteRes.msg || '未知错误'}. 请手动处理。</span>` }, true, 'makeup');
+                }
+            } catch (e) {
+                await addLogEntry({ message: `<span class="log-error">4. 删除临时受益人时发生网络错误: ${e.message}. 请手动处理。</span>` }, true, 'makeup');
+            }
+        }
+        analyzeBtn.disabled = false;
+        recordBtn.disabled = false;
+        recordBtn.textContent = '补录';
+    }
+  }
+
+
   // --- 初始化函数 ---
   async function init() {
     // 加载日志
     try {
         transactionPanelLogs = (await loadPreference(KEY_PERSISTENT_OPERATION_LOGS_TX, []));
         bankBeneficiaryPanelLogs = (await loadPreference(KEY_PERSISTENT_OPERATION_LOGS_BB, []));
+        makeupPanelLogs = (await loadPreference(KEY_PERSISTENT_OPERATION_LOGS_MU, []));
     } catch(e) {
         console.error("加载持久日志失败:", e);
-        transactionPanelLogs = []; bankBeneficiaryPanelLogs = []; // 即使失败也初始化为空数组
+        transactionPanelLogs = []; bankBeneficiaryPanelLogs = []; makeupPanelLogs = [];
         transactionPanelLogs.unshift({ time: formatDateTime(), message: `<span class="log-error">加载持久日志失败: ${escapeHtml(e.message)}.</span>`});
     }
 
@@ -1550,9 +1832,12 @@
     refreshIntervalId = setInterval(async () => {
         if (embedTxPanel.style.display !== 'none') {
             await loadGdsAccountCache();
-            await fetchTransactionData();
-            await fetchBankBeneficiaryData();
-            populateBankBeneAccountSelector();
+            if (currentActiveSubPanel === 'transaction') await fetchTransactionData();
+            if (currentActiveSubPanel === 'bankBeneficiary') await fetchBankBeneficiaryData();
+
+            // 刷新选择器内容，并保持选择
+            if (currentActiveSubPanel === 'bankBeneficiary') populateBankBeneAccountSelector();
+            if (currentActiveSubPanel === 'makeup') populateMakeupPanelSelectors();
         }
     }, REFRESH_INTERVAL_MS);
 
@@ -1561,13 +1846,16 @@
         const isHidden = embedTxPanel.style.display === 'none';
         if (isHidden) {
             embedTxPanel.style.display = 'flex';
-            showSubPanel(currentActiveSubPanel);
             if (!hasFetchedInitialData) {
                 await loadGdsAccountCache();
-                await fetchTransactionData(true);
-                await fetchBankBeneficiaryData(true);
+                await Promise.all([
+                    fetchTransactionData(true),
+                    fetchBankBeneficiaryData(true)
+                ]);
                 hasFetchedInitialData = true;
             }
+            // 总是显示当前激活的面板
+            showSubPanel(currentActiveSubPanel);
         } else {
             embedTxPanel.style.display = 'none';
         }
@@ -1586,13 +1874,14 @@
             const keysToClear = [
                 KEY_THEME_PREFERENCE, KEY_COLUMN_VISIBILITY_TX, KEY_SORT_CONFIG_TX, KEY_LAST_REFRESH_TX,
                 KEY_PAYOUT_THROTTLE_TIMESTAMPS, KEY_PERSISTENT_OPERATION_LOGS_TX, KEY_PERSISTENT_OPERATION_LOGS_BB,
+                KEY_PERSISTENT_OPERATION_LOGS_MU,
                 KEY_COLUMN_VISIBILITY_BB, KEY_SORT_CONFIG_BB, KEY_LAST_REFRESH_BB,
                 KEY_ACTIVE_SUBPANEL_PREFERENCE, KEY_BANK_BENE_SELECTED_ACCOUNT
             ];
             await Promise.all(keysToClear.map(k => embedTxDb.remove(EMBED_TX_STORE_NAME, k)));
 
             // 重置内存中的状态
-            transactionPanelLogs = []; bankBeneficiaryPanelLogs = [];
+            transactionPanelLogs = []; bankBeneficiaryPanelLogs = []; makeupPanelLogs = [];
             currentTheme = 'light';
             sortConfigTx = { key: null, direction: 'asc' };
             bankBeneficiarySortConfig = { key: null, direction: 'asc' };
@@ -1600,12 +1889,13 @@
             payoutThrottleTimestamps = {};
             currentActiveSubPanel = 'transaction'; hasFetchedInitialData = false;
             bankBeneSelectedAccountId = null;
+            makeupAnalysisResult = null;
 
             const elTs = document.getElementById('embed-tx-last-refresh-time'); if(elTs) {elTs.innerText='未加载'; elTs.classList.remove('error');}
             const elBbTs = document.getElementById('bank-beneficiary-last-refresh-time'); if(elBbTs) {elBbTs.innerText='未加载'; elBbTs.classList.remove('error');}
 
             // 重新加载并渲染所有偏好和UI
-            await init(); // 重新调用init来重新加载所有默认设置和UI
+            await init();
             await addLogEntry({ message: `<span class="log-warn">设置已重置.</span>` }, false, currentLogDisplayType);
             showToast('设置已重置', e);
         } else {
@@ -1621,9 +1911,16 @@
     document.getElementById('embed-tx-clear-bb-log').addEventListener('click', () => clearLogs('bankBeneficiary'));
     document.getElementById('embed-tx-export-bb-log').addEventListener('click', () => exportLogs('bankBeneficiary'));
 
+    // 补单面板控制事件
+    document.getElementById('makeup-analyze-btn').addEventListener('click', handleAnalyzeButtonClick);
+    document.getElementById('makeup-record-btn').addEventListener('click', handleMakeupRecordButtonClick);
+    document.getElementById('embed-tx-clear-mu-log').addEventListener('click', () => clearLogs('makeup'));
+    document.getElementById('embed-tx-export-mu-log').addEventListener('click', () => exportLogs('makeup'));
+
     // 面板切换器按钮事件
     document.getElementById('show-transaction-panel-btn').addEventListener('click', () => showSubPanel('transaction'));
     document.getElementById('show-bank-beneficiary-panel-btn').addEventListener('click', () => showSubPanel('bankBeneficiary'));
+    document.getElementById('show-makeup-panel-btn').addEventListener('click', () => showSubPanel('makeup'));
 
     await addLogEntry({ message: `<span class="log-info">初始化完成.</span>` }, false, 'transaction');
   }
