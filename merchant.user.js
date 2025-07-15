@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         GDS 综合报表工具集
-// @namespace    gds-comprehensive-report-toolkit-reconciliation-plus
-// @version      18.0
-// @description  【功能增强】“按商户统计”新增“核对账变”与“差额”列，并自动标红差异，极大方便财务对账。
+// @name         GDS 综合报表工具集 (商户过滤增强版)
+// @namespace    gds-comprehensive-report-toolkit-merchant-filter
+// @version      19.0
+// @description  【功能增强】“按商户统计”新增过滤规则，自动排除 channelGroupId 为 2 的商户，使统计结果更精确。
 // @author       Your Name
 // @match        https://admin.gdspay.xyz/aa*
 // @grant        none
@@ -11,11 +11,12 @@
 // @downloadURL  https://raw.githubusercontent.com/lkm888/tampermonkey/main/merchant.user.js
 // ==/UserScript==
 
+
 (function() {
     'use strict';
 
     // =========================================================================
-    // I. 共享模块 (Shared Modules)
+    // I. 共享模块 (Shared Modules) - (此部分无变化，保持原样)
     // =========================================================================
 
     function injectGlobalStyles() {
@@ -181,7 +182,7 @@
     };
 
     // =========================================================================
-    // II. 按银行账户统计模块
+    // II. 按银行账户统计模块 - (此部分无变化，保持原样)
     // =========================================================================
     const reconciliationReport = {
         masterResultData: [], upiAccountSet: new Set(), currentReportDate: '', BATCH_SIZE: 100,
@@ -604,7 +605,7 @@
                 const dateBegin = BASE_TIMESTAMP + diffDays * ONE_DAY_MS;
 
                 updateProgressBar(10, '阶段 1/2: 获取所有商户列表...');
-                const allMerchantsRaw = [];
+                let allMerchantsRaw = [];
                 for (let page = 1; ; page++) {
                     const url = `https://admin.gdspay.xyz/api/merchant/v1/list?page=${page}&pageSize=${PAGE_SIZE}`;
                     const res = await fetchWithRetry(url, { headers: { "authorization": token } }, `商户列表 p${page}`);
@@ -614,8 +615,19 @@
                     await sleep(this.REQUEST_DELAY);
                 }
 
+                // ---【过滤功能】在此处过滤掉 channelGroupId 为 2 的商户 ---
+                const filteredMerchants = allMerchantsRaw.filter(merchant => merchant.channelGroupId !== 2);
+                console.log(`原始商户数量: ${allMerchantsRaw.length}, 过滤后数量: ${filteredMerchants.length}`);
+
+                if (filteredMerchants.length === 0) {
+                    this.masterResultData = [];
+                    this.displayResults();
+                    uiElements.resultsContainer.innerHTML = `<h1>商户统计 (${this.currentReportDate})</h1><p>没有找到符合条件的商户 (已排除 channelGroupId=2)。</p>`;
+                    return;
+                }
+
                 updateProgressBar(50, `阶段 2/2: 获取每日汇总...`);
-                const allMerchantIds = allMerchantsRaw.map(m => m.merchantId);
+                const allMerchantIds = filteredMerchants.map(m => m.merchantId);
                 const statsMap = new Map();
                 for (let i = 0; i < allMerchantIds.length; i += this.STATS_API_BATCH_SIZE) {
                     const progress = 50 + (i / allMerchantIds.length) * 50;
@@ -628,7 +640,7 @@
                 }
 
                 const defaultStats = { paymentNumberInitiate: 0, paymentNumberComplete: 0, paymentAmountComplete: 0, payoutNumberInitiate: 0, payoutNumberComplete: 0, payoutAmountComplete: 0, commissionFlow: 0, balanceFlow: 0 };
-                this.masterResultData = allMerchantsRaw.map(m => {
+                this.masterResultData = filteredMerchants.map(m => {
                     const stats = statsMap.get(m.merchantId) || defaultStats;
                     const paymentAmount = stats.paymentAmountComplete / 100, paymentCount = stats.paymentNumberComplete;
                     const payoutAmount = stats.payoutAmountComplete / 100, payoutCount = stats.payoutNumberComplete;
