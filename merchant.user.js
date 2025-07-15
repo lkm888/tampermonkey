@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         GDS 综合报表工具集 (最终完整版)
-// @namespace    gds-comprehensive-report-toolkit-ultimate-complete
-// @version      22.1
-// @description  【最终完整版】三合一报表，代码完整，功能齐全，交互完美。高性能并发请求，实时搜索，智能记忆，满足所有需求。
+// @name         GDS 综合报表工具集 (最终增强版)
+// @namespace    gds-comprehensive-report-toolkit-ultimate-final-v24
+// @version      24.0
+// @description  【最终增强版】“账户-商户成功率”报表新增 Merchant No 列，数据维度更完整，搜索功能同步增强。
 // @author       Your Name
 // @match        https://admin.gdspay.xyz/aa*
 // @grant        none
@@ -223,7 +223,7 @@
         toggleView() {
             const isCompleteMode = document.getElementById('show-all-accounts-toggle').checked;
             const title = `银行账户统计 (${this.currentReportDate}) - ${isCompleteMode ? '完整模式' : 'UPI流水'}`;
-            const dataToRender = isCompleteMode ? this.masterResultData : this.masterResultData.filter(row => this.upiAccountSet.has(row['Account Name']));
+            const dataToRender = isCompleteMode ? this.masterResultData : this.masterResultData.filter(row => this.upiAccountSet.has(row['银行账户']));
             this.renderTable(title, dataToRender, this.masterResultData);
         },
         async fetchAllPaginatedData({ taskName, createFetchPromise, processPageData, onProgress }) {
@@ -270,22 +270,24 @@
         },
         processPaymentData(statistics, items) {
             for (const item of items) {
-                const { tripartiteAccount, status, actualAmount } = item;
+                const { tripartiteAccount, status, actualAmount, merchantNo } = item;
                 if (!tripartiteAccount) continue;
-                if (!statistics[tripartiteAccount]) {
-                    statistics[tripartiteAccount] = { '成功': { count: 0, totalAmount: 0 }, '已发送': { count: 0, totalAmount: 0 } };
+                const key = `payment|${merchantNo}|${tripartiteAccount}`;
+                if (!statistics[key]) {
+                    statistics[key] = { '成功': { count: 0, totalAmount: 0 }, '已发送': { count: 0, totalAmount: 0 }, merchantNo };
                 }
-                if (status === 3) { statistics[tripartiteAccount]['成功'].count++; statistics[tripartiteAccount]['成功'].totalAmount += (actualAmount / 100); }
-                else if (status === 2) { statistics[tripartiteAccount]['已发送'].count++; statistics[tripartiteAccount]['已发送'].totalAmount += (actualAmount / 100); }
+                if (status === 3) { statistics[key]['成功'].count++; statistics[key]['成功'].totalAmount += (actualAmount / 100); }
+                else if (status === 2) { statistics[key]['已发送'].count++; statistics[key]['已发送'].totalAmount += (actualAmount / 100); }
             }
         },
         processPayoutData(statistics, items) {
             for (const item of items) {
-                const { tripartiteAccount, amount } = item;
+                const { tripartiteAccount, amount, merchantNo } = item;
                 if (!tripartiteAccount) continue;
-                if (!statistics[tripartiteAccount]) { statistics[tripartiteAccount] = { count: 0, totalAmount: 0 }; }
-                statistics[tripartiteAccount].count++;
-                statistics[tripartiteAccount].totalAmount += (amount / 100);
+                const key = `payout|${merchantNo}|${tripartiteAccount}`;
+                if (!statistics[key]) { statistics[key] = { count: 0, totalAmount: 0, merchantNo }; }
+                statistics[key].count++;
+                statistics[key].totalAmount += (amount / 100);
             }
         },
         renderTable(title, dataToRender, fullDataForSorting) {
@@ -312,7 +314,7 @@
                         if (key.includes('金额') || key.includes('-金')) { formattedValue = formatCurrency(value); }
                         else if (key.includes('笔数') || key.includes('-笔')) { formattedValue = formatInteger(value); }
                         else { td.classList.remove('col-number'); td.classList.add('col-text'); }
-                        if (key === 'Account Name') td.classList.add('col-primary-text');
+                        if (key === '银行账户') td.classList.add('col-primary-text');
                         if (key === '转入金额') td.classList.add('col-profit');
                         if (key === '转出金额') td.classList.add('col-loss');
 
@@ -357,7 +359,7 @@
                     thead.querySelectorAll('th').forEach(h => h.classList.remove('sort-asc', 'sort-desc'));
                     e.currentTarget.classList.add(currentSortDir === 'asc' ? 'sort-asc' : 'sort-desc');
                     const isCompleteMode = document.getElementById('show-all-accounts-toggle').checked;
-                    const currentlyVisibleData = isCompleteMode ? fullDataForSorting : fullDataForSorting.filter(row => this.upiAccountSet.has(row['Account Name']));
+                    const currentlyVisibleData = isCompleteMode ? fullDataForSorting : fullDataForSorting.filter(row => this.upiAccountSet.has(row['银行账户']));
                     populateTbody(currentlyVisibleData);
                 });
             });
@@ -423,18 +425,20 @@
                      uiElements.resultsContainer.innerHTML = `<h1>银行账户统计 (${this.currentReportDate})</h1><p>在指定日期没有找到任何数据。</p>`;
                 } else {
                     const [refStats, paymentStats, payoutStats] = await Promise.all(tasks.map((task) => this.fetchAllPaginatedData({ ...task, onProgress })));
-                    const allAccountKeys = new Set([...Object.values(refStats).map(g => g.accountName), ...Object.keys(paymentStats), ...Object.keys(payoutStats)]);
+
+                    const allKeys = new Set([...Object.keys(refStats), ...Object.keys(paymentStats), ...Object.keys(payoutStats)]);
                     this.upiAccountSet = new Set(Object.values(refStats).map(g => g.accountName));
-                    this.masterResultData = Array.from(allAccountKeys).map(account => {
-                        const refGroupKey = Object.keys(refStats).find(key => key.endsWith(`|${account}`));
-                        const refGroup = refStats[refGroupKey] || { channelId: 'N/A', merchantNo: 'N/A', accountName: account, '自动': { count: 0, totalAmount: 0 }, '收银台': { count: 0, totalAmount: 0 }, 'TG补单': { count: 0, totalAmount: 0 }, '未匹配': { count: 0, totalAmount: 0 } };
-                        const paymentData = paymentStats[account] || { '成功': { count: 0, totalAmount: 0 }, '已发送': { count: 0, totalAmount: 0 }};
-                        const payoutData = payoutStats[account] || { count: 0, totalAmount: 0 };
+
+                    this.masterResultData = Array.from(allKeys).map(key => {
+                        const [, merchantNo, account] = key.split('|');
+                        const refGroup = refStats[key] || { channelId: 'N/A', '自动': { count: 0, totalAmount: 0 }, '收银台': { count: 0, totalAmount: 0 }, 'TG补单': { count: 0, totalAmount: 0 }, '未匹配': { count: 0, totalAmount: 0 } };
+                        const paymentData = paymentStats[key] || { '成功': { count: 0, totalAmount: 0 }, '已发送': { count: 0, totalAmount: 0 }};
+                        const payoutData = payoutStats[key] || { count: 0, totalAmount: 0 };
                         const totalUpiCount = Object.values(refGroup).reduce((acc, val) => acc + (val.count || 0), 0);
                         const paymentSuccessCount = paymentData['成功'].count;
                         const paymentSentCount = paymentData['已发送'].count;
                         return {
-                            'Channel ID': refGroup.channelId, 'Merchant No': refGroup.merchantNo, 'Account Name': account,
+                            'Channel ID': refGroup.channelId, 'Merchant No': merchantNo, '银行账户': account,
                             '转入金额': paymentData['成功'].totalAmount, '转出金额': payoutData.totalAmount,
                             '代收成功-笔': paymentSuccessCount, '代收已发送-笔': paymentSentCount, '代收成功率': (paymentSuccessCount + paymentSentCount) > 0 ? `${calculateRate(paymentSuccessCount, paymentSuccessCount + paymentSentCount).toFixed(2)}%` : '0.00%',
                             '成功金额 (自动)': refGroup['自动'].totalAmount, '成功率 (自动)': totalUpiCount > 0 ? `${calculateRate(refGroup['自动'].count, totalUpiCount).toFixed(2)}%` : '0.00%',
@@ -445,7 +449,7 @@
                             '未匹配-笔': refGroup['未匹配'].count, '未匹配-金': refGroup['未匹配'].totalAmount,
                             '总笔数 (UPI)': totalUpiCount, '总金额 (UPI)': Object.values(refGroup).reduce((acc, val) => acc + (val.totalAmount || 0), 0),
                         };
-                    }).sort((a,b) => String(a['Account Name']).localeCompare(String(b['Account Name'])));
+                    }).sort((a,b) => String(a['银行账户']).localeCompare(String(b['银行账户'])) || String(a['Merchant No']).localeCompare(String(b['Merchant No'])));
 
                     document.getElementById('show-all-accounts-toggle').checked = false;
                     this.toggleView();
@@ -706,7 +710,7 @@
                 <button id="back-to-selection-btn">← 返回选择</button>
                 <label for="stats-date-input" style="font-weight: bold;">选择日期:</label>
                 <input type="date" id="stats-date-input" value="${getTodayString()}">
-                <input type="text" id="table-search-input" placeholder="搜索银行账户或商户..." style="display: none;">
+                <input type="text" id="table-search-input" placeholder="搜索账户/商户/编号..." style="display: none;">
                 <button id="start-generation-btn">生成报表</button>
             `;
             document.getElementById('back-to-selection-btn').addEventListener('click', showReportSelection);
@@ -773,11 +777,11 @@
 
                 const stats = {};
                 for (const order of allOrders) {
-                    const { tripartiteAccount, merchantName, status } = order;
+                    const { tripartiteAccount, merchantName, merchantNo, status } = order;
                     if (!tripartiteAccount || !merchantName) continue;
-                    const key = `${tripartiteAccount}|${merchantName}`;
+                    const key = `${tripartiteAccount}|${merchantName}|${merchantNo}`;
                     if (!stats[key]) {
-                        stats[key] = { tripartiteAccount, merchantName, total: 0, success: 0 };
+                        stats[key] = { tripartiteAccount, merchantName, merchantNo, total: 0, success: 0 };
                     }
                     stats[key].total++;
                     if (status === 3) {
@@ -788,6 +792,7 @@
                 this.masterResultData = Object.values(stats).map(item => ({
                     '银行账户': item.tripartiteAccount,
                     '商户名称': item.merchantName,
+                    'Merchant No': item.merchantNo,
                     '成功笔数': item.success,
                     '总笔数': item.total,
                     '成功率': calculateRate(item.success, item.total),
@@ -840,9 +845,17 @@
                             else if (rate > 0) td.classList.add('rate-low');
                             formattedValue = formatPercent(value);
                         } else {
-                            td.classList.add('col-text', 'col-primary-text');
+                            td.classList.add('col-text');
+                            if (key === '银行账户' || key === '商户名称') {
+                                td.classList.add('col-primary-text');
+                            }
                         }
                         td.innerText = formattedValue;
+                        td.addEventListener('contextmenu', e => { e.preventDefault(); navigator.clipboard.writeText(td.innerText).then(() => {
+                                let feedback = td.querySelector('.copy-feedback'); if (!feedback) { feedback = document.createElement('div'); feedback.className = 'copy-feedback'; feedback.innerText = '已复制!'; td.appendChild(feedback); }
+                                feedback.style.opacity = '1'; setTimeout(() => { feedback.style.opacity = '0'; }, 1000);
+                            });
+                        });
                         row.appendChild(td);
                     });
                     tbody.appendChild(row);
@@ -881,7 +894,8 @@
             this.currentFilteredData = this.masterResultData.filter(row => {
                 const accountCell = row['银行账户'].toLowerCase();
                 const merchantCell = row['商户名称'].toLowerCase();
-                return accountCell.includes(lowerCaseSearchTerm) || merchantCell.includes(lowerCaseSearchTerm);
+                const merchantNoCell = String(row['Merchant No']).toLowerCase(); // 确保是字符串
+                return accountCell.includes(lowerCaseSearchTerm) || merchantCell.includes(lowerCaseSearchTerm) || merchantNoCell.includes(lowerCaseSearchTerm);
             });
             this.renderTable(`账户-商户成功率 (${this.currentReportDate})`, this.currentFilteredData);
         }
