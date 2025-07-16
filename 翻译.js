@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GDSPay Admin Helper (Translate & Copy)
 // @namespace    http://tampermonkey.net/
-// @version      1.4 // Refactored transfer page copy to use Event Delegation for dynamic content
-// @description  Replaces Chinese text on payout pages (with toggle), and adds copy-on-click for amounts and account numbers on the transfer list page.
+// @version      1.6 // Transfer page: Dynamically find columns by header name to support table layout changes.
+// @description  Replaces Chinese text on payout pages (with toggle), and adds copy-on-click for amounts and account numbers on the transfer list page. Now robust against column changes.
 // @author       Your Name
 // @match        https://admin.gdspay.xyz/payout/*
 // @match        https://admin.gdspay.xyz/transfer*
@@ -33,9 +33,11 @@
     let activeObserver = null; // Observer for Payout page
     let currentActiveUrl = null; // Tracks the URL the script is currently active on
 
-    // --- NEW: State for Transfer Page ---
+    // --- State for Transfer Page ---
     const TRANSFER_STYLE_ID = 'gdspay-transfer-copy-styles';
-    let transferClickHandler = null; // Holds the reference to the click handler function for removal
+    let transferClickHandler = null; // Holds the reference to the click handler function
+    let amountColumnIndex = -1; // To be determined dynamically
+    let accountColumnIndex = -1; // To be determined dynamically
 
     // --- Translations (For Payout Page) ---
     const translations = {
@@ -214,52 +216,50 @@
         document.getElementById(BUTTON_ID)?.remove();
     }
 
-    // --- Transfer Page Specific Functions (REFACTORED) ---
+    // --- Transfer Page Specific Functions (ROBUST VERSION) ---
 
     /**
      * Handles clicks on the transfer table using event delegation.
-     * @param {MouseEvent} event The click event.
+     * Uses dynamically found column indices.
      */
     async function handleTransferTableClick(event) {
-        // Find the cell that was clicked, or whose child was clicked
-        const cell = event.target.closest('td.ant-table-cell');
+        if (amountColumnIndex === -1 && accountColumnIndex === -1) return; // Columns not found yet
 
-        // Check if the click was inside a table body cell.
-        // This ensures we don't act on clicks in the header or outside the table.
-        if (!cell || !cell.closest('.ant-table-tbody')) {
-            return;
-        }
+        const cell = event.target.closest('td.ant-table-cell');
+        if (!cell || !cell.closest('.ant-table-tbody')) return;
 
         const row = cell.closest('.ant-table-row');
         if (!row) return;
 
-        // Get all cells in the row to determine the index of the clicked cell
         const cells = Array.from(row.children);
         const cellIndex = cells.indexOf(cell);
 
-        // Column 7 (index 6) is "金额" (Amount)
-        if (cellIndex === 6) {
-            const rawAmountText = cell.textContent.trim().replace(/,/g, '');
-            // Extracts integer part, e.g., "47899.00" -> 47899
-            const amountToCopy = parseInt(rawAmountText, 10);
+        // Clicked on "金额" (Amount) column
+        if (cellIndex === amountColumnIndex) {
+            let amountText = cell.textContent.trim().replace(/,/g, '');
+            if (amountText.endsWith('.00')) amountText = amountText.slice(0, -3);
 
-            if (!isNaN(amountToCopy)) {
+            const accountNumberCell = cells[accountColumnIndex];
+            const accountNumberText = accountNumberCell?.textContent.trim() || '';
+
+            if (amountText && accountNumberText) {
+                const textToCopy = ` ${amountText}\n ${accountNumberText}`;
                 try {
-                    await navigator.clipboard.writeText(String(amountToCopy));
-                    showCopyFeedback(cell, `Copied: ${amountToCopy}`);
+                    await navigator.clipboard.writeText(textToCopy);
+                    showCopyFeedback(cell, 'Amount & Account Copied!');
                 } catch (err) {
                     showCopyFeedback(cell, 'Copy failed!', true);
                 }
             }
         }
 
-        // Column 10 (index 9) is "收款账号" (Account Number)
-        if (cellIndex === 9) {
+        // Clicked on "收款账号" (Account Number) column
+        if (cellIndex === accountColumnIndex) {
             const textToCopy = cell.textContent.trim();
             if (textToCopy) {
                 try {
                     await navigator.clipboard.writeText(textToCopy);
-                    showCopyFeedback(cell, `Copied!`);
+                    showCopyFeedback(cell, `Copied: ${textToCopy}`);
                 } catch (err) {
                     showCopyFeedback(cell, 'Copy failed!', true);
                 }
@@ -270,11 +270,7 @@
 
     // --- Core Initializers & Cleanup ---
 
-    /**
-     * Cleans up all script modifications from the page.
-     */
     function cleanup() {
-        // Cleanup for Payout Page
         if (activeObserver) {
             activeObserver.disconnect();
             activeObserver = null;
@@ -282,20 +278,17 @@
         originalTextMap.clear();
         removeToggleButton();
 
-        // Cleanup for Transfer Page
         if (transferClickHandler) {
             document.body.removeEventListener('click', transferClickHandler);
             transferClickHandler = null;
         }
         document.getElementById(TRANSFER_STYLE_ID)?.remove();
+        amountColumnIndex = -1; // Reset dynamic index
+        accountColumnIndex = -1; // Reset dynamic index
 
-        // General cleanup
         currentActiveUrl = null;
     }
 
-    /**
-     * Initializes all features for the Payout Detail page.
-     */
     function initializeForPayoutPage() {
         traverseAndProcessNodes(document.body);
         addCopyOnCLickToTransactionRef(document.body);
@@ -322,27 +315,70 @@
     }
 
     /**
-     * Initializes all features for the Transfer List page using Event Delegation.
+     * Finds column indices by header text and injects dynamic CSS for clickable cells.
+     * Returns true if successful, false otherwise.
      */
-    function initializeForTransferPage() {
-        // Inject CSS to provide visual feedback (pointer cursor) on clickable cells.
-        if (!document.getElementById(TRANSFER_STYLE_ID)) {
+    function findColumnsAndInjectStyles() {
+        const headerCells = document.querySelectorAll('.ant-table-thead th');
+        if (headerCells.length === 0) return false; // Table not ready yet
+
+        headerCells.forEach((th, index) => {
+            const headerText = th.textContent.trim();
+            if (headerText === '金额') {
+                amountColumnIndex = index;
+            } else if (headerText === '收款账号') {
+                accountColumnIndex = index;
+            }
+        });
+
+        if (amountColumnIndex === -1 && accountColumnIndex === -1) {
+            console.log("GDSPay Helper: '金额' or '收款账号' columns not found in header.");
+            return false; // Headers found, but not the ones we want
+        }
+
+        // Dynamically create CSS selectors
+        const cssSelectors = [];
+        // nth-child is 1-based, so we add 1 to the 0-based index
+        if (amountColumnIndex !== -1) {
+            cssSelectors.push(`.ant-table-tbody > tr > td:nth-child(${amountColumnIndex + 1})`);
+        }
+        if (accountColumnIndex !== -1) {
+            cssSelectors.push(`.ant-table-tbody > tr > td:nth-child(${accountColumnIndex + 1})`);
+        }
+
+        if (cssSelectors.length > 0) {
+            document.getElementById(TRANSFER_STYLE_ID)?.remove(); // Remove old style if it exists
             const style = document.createElement('style');
             style.id = TRANSFER_STYLE_ID;
-            // td:nth-child(7) is Amount, td:nth-child(10) is Account Number.
             style.innerHTML = `
-                .ant-table-tbody > tr > td:nth-child(7),
-                .ant-table-tbody > tr > td:nth-child(10) {
+                ${cssSelectors.join(',\n')} {
                     cursor: pointer;
-                    user-select: none; /* Prevents text selection on click */
+                    user-select: none;
                 }
             `;
             document.head.appendChild(style);
+            console.log(`GDSPay Helper: Found columns. Amount: ${amountColumnIndex}, Account: ${accountColumnIndex}. Styles injected.`);
         }
+        return true;
+    }
 
-        // Add a single, delegated event listener to the body.
+    function initializeForTransferPage() {
+        // Add the single, delegated event listener immediately.
+        // It won't do anything until the column indices are found.
         transferClickHandler = handleTransferTableClick;
         document.body.addEventListener('click', transferClickHandler);
+
+        // Try to find columns and inject styles. If the table isn't ready,
+        // set up an interval to retry for a few seconds.
+        if (!findColumnsAndInjectStyles()) {
+            let attempts = 0;
+            const interval = setInterval(() => {
+                attempts++;
+                if (findColumnsAndInjectStyles() || attempts > 20) { // Try for 10 seconds (20 * 500ms)
+                    clearInterval(interval);
+                }
+            }, 500);
+        }
     }
 
 
@@ -360,11 +396,14 @@
             currentActiveUrl = currentUrl;
 
             if (isPayout) {
+                console.log('GDSPay Helper: Initializing for Payout Page.');
                 initializeForPayoutPage();
             } else if (isTransfer) {
+                console.log('GDSPay Helper: Initializing for Transfer Page.');
                 initializeForTransferPage();
             }
         } else if (!isPayout && !isTransfer && currentActiveUrl) {
+            console.log('GDSPay Helper: Cleaning up from previous page.');
             cleanup();
         }
     }
@@ -372,10 +411,9 @@
     // --- Execution Triggers ---
     mainLoop();
 
-    // Use a MutationObserver on the <title> element to detect SPA navigation,
-    // which is a common and fairly reliable method.
+    // Use a MutationObserver on the <title> element to detect SPA navigation.
     new MutationObserver(mainLoop).observe(document.querySelector('head > title'), { childList: true });
-    // Fallback interval check for cases where title doesn't change.
+    // Fallback interval check for cases where title doesn't change or for other SPA updates.
     setInterval(mainLoop, 500);
 
 })();
