@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         GDS 综合报表工具集 (最终增强版)
-// @namespace    gds-comprehensive-report-toolkit-ultimate-final-v24
-// @version      24.0
-// @description  【最终增强版】“账户-商户成功率”报表新增 Merchant No 列，数据维度更完整，搜索功能同步增强。
+// @name         GDS 综合报表工具集 (费率修复最终版)
+// @namespace    gds-comprehensive-report-toolkit-rate-fix
+// @version      29.1
+// @description  【最终修正】恢复“按商户统计”中费率的详细显示格式。统一所有单元格的右键复制行为，确保所见即所得，体验完美。
 // @author       Your Name
 // @match        https://admin.gdspay.xyz/aa*
 // @grant        none
@@ -23,26 +23,20 @@
     function injectGlobalStyles() {
         const styles = `
             /* General & Launcher Styles */
-            #stats-button { position: fixed; bottom: 20px; right: 20px; z-index: 9999; padding: 10px 15px; font-size: 14px; font-weight: bold; color: white; background-color: #007BFF; border: none; border-radius: 5px; cursor: pointer; box-shadow: 0 4px 8px rgba(0,0,0,0.2); transition: background-color 0.3s; }
-            #stats-button:hover { background-color: #0056b3; }
-            #stats-button:disabled { background-color: #cccccc; cursor: not-allowed; }
-            #stats-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.5); z-index: 10000; display: none; justify-content: center; align-items: flex-start; padding-top: 5vh; }
+            #stats-button { position: fixed; bottom: 20px; right: 20px; z-index: 9999; padding: 10px 15px; font-size: 14px; font-weight: bold; color: white; background-color: #007BFF; border: none; border-radius: 5px; cursor: pointer; box-shadow: 0 4px 8px rgba(0,0,0,0.2); transition: all 0.2s ease-in-out; }
+            #stats-button:hover { background-color: #0056b3; transform: translateY(-2px); }
+            #stats-button:disabled { background-color: #cccccc; cursor: not-allowed; transform: none; }
+            #stats-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.6); z-index: 10000; display: none; justify-content: center; align-items: flex-start; padding-top: 5vh; backdrop-filter: blur(3px); }
             #stats-modal { background-color: #fefefe; padding: 20px; border-radius: 8px; width: 98%; max-width: 98vw; height: 90vh; overflow: auto; box-shadow: 0 5px 15px rgba(0,0,0,0.3); position: relative; }
             #stats-close-btn { position: absolute; top: 10px; right: 20px; font-size: 28px; font-weight: bold; color: #aaa; cursor: pointer; z-index: 10; }
             #stats-close-btn:hover { color: #333; }
             #stats-controls { display: flex; align-items: center; gap: 15px; margin-bottom: 20px; padding-bottom: 15px; border-bottom: 1px solid #eee; flex-wrap: wrap; justify-content: flex-start; }
             #stats-date-input { font-size: 16px; padding: 8px; border: 1px solid #ccc; border-radius: 4px; }
-            #start-generation-btn { font-size: 16px; padding: 8px 15px; background-color: #28a745; color: white; border: none; border-radius: 4px; cursor: pointer; }
-            #start-generation-btn:hover { background-color: #218838; }
-            #start-generation-btn:disabled { background-color: #cccccc; }
-            #table-search-input { font-size: 16px; padding: 8px; border: 1px solid #ccc; border-radius: 4px; }
+            #start-generation-btn { font-size: 16px; padding: 8px 15px; background-color: #28a745; color: white; border: none; border-radius: 4px; cursor: pointer; transition: all 0.2s ease-in-out; }
+            #start-generation-btn:hover { background-color: #218838; transform: translateY(-2px); box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+            #start-generation-btn:disabled { background-color: #cccccc; transform: none; box-shadow: none; }
+            #table-search-input { font-size: 16px; padding: 8px; border: 1px solid #ccc; border-radius: 4px; margin-left: auto; }
 
-            #progress-container { width: 80%; margin: 50px auto; text-align: center; }
-            #progress-bar { background-color: #e9ecef; border-radius: .25rem; height: 20px; width: 100%; overflow: hidden; }
-            #progress-bar-inner { background-color: #007bff; height: 100%; width: 0%; transition: width 0.4s ease; }
-            #progress-text { margin-top: 10px; font-weight: bold; color: #495057; }
-            .copy-feedback { position: absolute; top: 0; left: 0; right: 0; bottom: 0; background-color: #28a745; color: white; display: flex; justify-content: center; align-items: center; font-weight: bold; opacity: 0; transition: opacity 0.5s; pointer-events: none; }
-            .filter-label, .status-filter-label, .toggle-label { display: flex; align-items: center; gap: 5px; font-weight: bold; cursor: pointer; user-select: none; }
             .report-selection-container { display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 20px; padding: 20px; width: 100%; }
             .report-selection-row { display: flex; justify-content: center; align-items: center; gap: 30px; }
             .report-selection-btn { font-size: 18px; font-weight: bold; padding: 20px 30px; border-radius: 8px; border: 2px solid transparent; cursor: pointer; transition: all 0.3s; min-width: 250px; text-align: center; }
@@ -50,18 +44,20 @@
             #select-reconciliation-report { background-color: #28a745; color: white; border-color: #218838; }
             #select-merchant-report { background-color: #17a2b8; color: white; border-color: #138496; }
             #select-account-merchant-rate-report { background-color: #ffc107; color: #212529; border-color: #e0a800; }
-            #back-to-selection-btn { background: none; border: none; color: #007bff; cursor: pointer; font-size: 14px; padding: 8px 0; margin-right: 10px;}
+            #back-to-selection-btn { background: #6c757d; color: white; border: none; font-size: 14px; padding: 8px 12px; margin-right: 10px; border-radius: 4px; display: flex; align-items: center; gap: 5px; transition: all 0.2s ease-in-out; }
+            #back-to-selection-btn:hover { background: #5a6268; transform: translateY(-2px); }
 
             /* Rich Table Visual Styles */
-            #stats-results-container h1 { border-bottom: 2px solid #007BFF; padding-bottom: 10px; margin-top: 10px; margin-bottom: 15px; color: #333; }
-            #stats-results-container table { width: 100%; border-collapse: collapse; margin-bottom: 20px; font-size: 12px; table-layout: auto; }
+            #stats-results-container { display: flex; flex-direction: column; align-items: center; }
+            #stats-results-container h1 { width: 100%; text-align: left; border-bottom: 2px solid #007BFF; padding-bottom: 10px; margin-top: 10px; margin-bottom: 15px; color: #333; }
+            #stats-results-container table { display: inline-block; border-collapse: collapse; margin-bottom: 20px; font-size: 12px; max-width: 100%; overflow-x: auto;}
             #stats-results-container td { position: relative; }
             #stats-results-container th, #stats-results-container td { border: 1px solid #ddd; padding: 10px 8px; white-space: nowrap; transition: all 0.2s ease-in-out; vertical-align: middle; }
             #stats-results-container th { background-color: #f2f2f2; font-weight: bold; position: sticky; top: -1px; cursor: pointer; user-select: none; text-align: center; }
             #stats-results-container tbody tr:nth-child(odd) { background-color: #f9f9f9; }
             #stats-results-container tbody tr:hover { background-color: #e6f7ff; transform: scale(1.015); box-shadow: 0 4px 8px rgba(0,0,0,0.1); z-index: 10; position: relative; }
             #stats-results-container tbody tr:hover td { font-size: 13px; }
-            #stats-results-container tfoot td { background-color: #e9ecef; font-weight: bold; text-align: right; }
+            #stats-results-container tfoot td { background-color: #e9ecef; font-weight: bold; text-align: right; border-top: 2px solid #ccc; padding: 12px 8px; }
             #stats-results-container tfoot td:first-child { text-align: left; }
             #stats-results-container th.sort-asc::after, #stats-results-container th.sort-desc::after { content: ''; display: inline-block; margin-left: 5px; border-left: 4px solid transparent; border-right: 4px solid transparent; }
             #stats-results-container th.sort-asc::after { border-bottom: 5px solid #333; }
@@ -81,6 +77,13 @@
             .rate-high { color: #28a745 !important; font-weight:bold; }
             .rate-medium { color: #ffc107 !important; font-weight:bold; }
             .rate-low { color: #dc3545 !important; font-weight:bold; }
+
+            /* Skeleton & Copy Feedback */
+            .skeleton-table { width: 100%; }
+            .skeleton-table .skeleton-row { display: flex; padding: 10px 0; border-bottom: 1px solid #e0e0e0; }
+            .skeleton-table .skeleton-cell { height: 20px; background: linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%); background-size: 200% 100%; animation: skeleton-shine 1.5s infinite; border-radius: 4px; margin: 0 5px; }
+            @keyframes skeleton-shine { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+            .copy-feedback { position: absolute; top: 0; left: 0; right: 0; bottom: 0; background-color: rgba(40, 167, 69, 0.85); color: white; display: flex; justify-content: center; align-items: center; font-weight: bold; opacity: 0; transition: opacity 0.4s; pointer-events: none; z-index: 5; }
         `;
         const styleSheet = document.createElement("style");
         styleSheet.type = "text/css";
@@ -163,6 +166,40 @@
         });
     }
 
+    function showSkeletonLoader(columns = 8) {
+        if (!uiElements) return;
+        const { resultsContainer } = uiElements;
+        let skeletonHTML = '<div class="skeleton-table">';
+        for (let i = 0; i < 10; i++) {
+            skeletonHTML += '<div class="skeleton-row">';
+            for (let j = 0; j < columns; j++) {
+                const width = 80 + Math.random() * 70;
+                skeletonHTML += `<div class="skeleton-cell" style="width: ${width}px; flex: 1 1 ${width}px;"></div>`;
+            }
+            skeletonHTML += '</div>';
+        }
+        skeletonHTML += '</div>';
+        resultsContainer.innerHTML = skeletonHTML;
+    }
+
+    function addCopyToCell(td) {
+        const feedback = document.createElement('div');
+        feedback.className = 'copy-feedback';
+        feedback.innerText = '已复制!';
+        td.appendChild(feedback);
+
+        td.addEventListener('contextmenu', e => {
+            e.preventDefault();
+            const valueToCopy = td.innerText;
+            navigator.clipboard.writeText(valueToCopy).then(() => {
+                feedback.style.opacity = '1';
+                setTimeout(() => {
+                    feedback.style.opacity = '0';
+                }, 1000);
+            });
+        });
+    }
+
     const MAX_RETRIES = 3, RETRY_DELAY = 500, PAGE_SIZE = 100;
     const BASE_DATE_STR = '2025-06-15', BASE_TIMESTAMP = 1749925800000, ONE_DAY_MS = 86400000;
     const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
@@ -207,7 +244,7 @@
             controlsDiv.style.borderBottom = '1px solid #eee';
             resultsContainer.innerHTML = '';
             controlsDiv.innerHTML = `
-                <button id="back-to-selection-btn">← 返回选择</button>
+                <button id="back-to-selection-btn">↩ 返回</button>
                 <label for="stats-date-input" style="font-weight: bold;">选择日期:</label>
                 <input type="date" id="stats-date-input" value="${getTodayString()}">
                 <label class="toggle-label" id="view-toggle-label" style="display: none;">
@@ -257,9 +294,14 @@
             for (const item of items) {
                 if (!item.txnDescription || !item.txnDescription.toUpperCase().startsWith('UPI')) continue;
                 const { channelId, merchantNo, accountName, matchSource, amount } = item;
-                const groupKey = `${channelId}|${merchantNo}|${accountName || 'N/A'}`;
+                const groupKey = accountName || 'N/A';
                 if (!statistics[groupKey]) {
-                    statistics[groupKey] = { channelId, merchantNo, accountName: accountName || 'N/A', ...Object.fromEntries(Object.values(MATCH_SOURCE_MAP).map(k => [k, { count: 0, totalAmount: 0 }])) };
+                    statistics[groupKey] = {
+                        channelId,
+                        merchantNo,
+                        accountName: groupKey,
+                        ...Object.fromEntries(Object.values(MATCH_SOURCE_MAP).map(k => [k, { count: 0, totalAmount: 0 }]))
+                    };
                 }
                 const statusName = MATCH_SOURCE_MAP[matchSource];
                 if (statusName) {
@@ -270,11 +312,11 @@
         },
         processPaymentData(statistics, items) {
             for (const item of items) {
-                const { tripartiteAccount, status, actualAmount, merchantNo } = item;
+                const { tripartiteAccount, status, actualAmount } = item;
                 if (!tripartiteAccount) continue;
-                const key = `payment|${merchantNo}|${tripartiteAccount}`;
+                const key = tripartiteAccount;
                 if (!statistics[key]) {
-                    statistics[key] = { '成功': { count: 0, totalAmount: 0 }, '已发送': { count: 0, totalAmount: 0 }, merchantNo };
+                    statistics[key] = { '成功': { count: 0, totalAmount: 0 }, '已发送': { count: 0, totalAmount: 0 } };
                 }
                 if (status === 3) { statistics[key]['成功'].count++; statistics[key]['成功'].totalAmount += (actualAmount / 100); }
                 else if (status === 2) { statistics[key]['已发送'].count++; statistics[key]['已发送'].totalAmount += (actualAmount / 100); }
@@ -282,10 +324,10 @@
         },
         processPayoutData(statistics, items) {
             for (const item of items) {
-                const { tripartiteAccount, amount, merchantNo } = item;
+                const { tripartiteAccount, amount } = item;
                 if (!tripartiteAccount) continue;
-                const key = `payout|${merchantNo}|${tripartiteAccount}`;
-                if (!statistics[key]) { statistics[key] = { count: 0, totalAmount: 0, merchantNo }; }
+                const key = tripartiteAccount;
+                if (!statistics[key]) { statistics[key] = { count: 0, totalAmount: 0 }; }
                 statistics[key].count++;
                 statistics[key].totalAmount += (amount / 100);
             }
@@ -310,10 +352,21 @@
                         const td = document.createElement('td');
                         const value = rowData[key];
                         let formattedValue = value;
-                        td.classList.add('col-number');
-                        if (key.includes('金额') || key.includes('-金')) { formattedValue = formatCurrency(value); }
-                        else if (key.includes('笔数') || key.includes('-笔')) { formattedValue = formatInteger(value); }
-                        else { td.classList.remove('col-number'); td.classList.add('col-text'); }
+
+                        if (key.includes('金额') || key.includes('-金')) {
+                            formattedValue = formatCurrency(value);
+                            td.classList.add('col-number');
+                        } else if (key.includes('笔数') || key.includes('-笔')) {
+                            formattedValue = formatInteger(value);
+                            td.classList.add('col-number');
+                        } else if (key.includes('率')) {
+                            const rate = parseFloat(value) || 0;
+                            formattedValue = `${rate.toFixed(2)}%`;
+                            td.classList.add('col-number');
+                        } else {
+                            td.classList.add('col-text');
+                        }
+
                         if (key === '银行账户') td.classList.add('col-primary-text');
                         if (key === '转入金额') td.classList.add('col-profit');
                         if (key === '转出金额') td.classList.add('col-loss');
@@ -329,11 +382,7 @@
                         }
 
                         td.innerText = formattedValue;
-                        td.addEventListener('contextmenu', e => { e.preventDefault(); navigator.clipboard.writeText(td.innerText).then(() => {
-                                let feedback = td.querySelector('.copy-feedback'); if (!feedback) { feedback = document.createElement('div'); feedback.className = 'copy-feedback'; feedback.innerText = '已复制!'; td.appendChild(feedback); }
-                                feedback.style.opacity = '1'; setTimeout(() => { feedback.style.opacity = '0'; }, 1000);
-                            });
-                        });
+                        addCopyToCell(td);
                         row.appendChild(td);
                     });
                     tbody.appendChild(row);
@@ -395,7 +444,7 @@
 
             startGenBtn.disabled = true; uiElements.statsButton.disabled = true; startGenBtn.innerText = '正在统计...';
             toggleLabel.style.display = 'none';
-            uiElements.resultsContainer.innerHTML = `<div id="progress-container"><div id="progress-bar"><div id="progress-bar-inner"></div></div><div id="progress-text">正在初始化...</div></div>`;
+            showSkeletonLoader(18);
 
             this.currentReportDate = dateInput.value;
             const diffDays = Math.round((new Date(this.currentReportDate) - new Date(BASE_DATE_STR)) / ONE_DAY_MS);
@@ -409,7 +458,7 @@
                 let totalPagesCombined = 0, progressCounter = 0;
                 const onProgress = () => {
                     progressCounter++;
-                    updateProgressBar((totalPagesCombined > 0 ? progressCounter / totalPagesCombined : 0) * 100, `正在处理: ${progressCounter} / ${totalPagesCombined} 页`);
+                    uiElements.resultsContainer.innerHTML = `<div id="progress-container"><div id="progress-bar"><div id="progress-bar-inner" style="width: ${totalPagesCombined > 0 ? (progressCounter / totalPagesCombined) * 100 : 0}%"></div></div><div id="progress-text">正在处理: ${progressCounter} / ${totalPagesCombined} 页</div></div>`;
                 };
 
                 const tasks = [
@@ -426,19 +475,18 @@
                 } else {
                     const [refStats, paymentStats, payoutStats] = await Promise.all(tasks.map((task) => this.fetchAllPaginatedData({ ...task, onProgress })));
 
-                    const allKeys = new Set([...Object.keys(refStats), ...Object.keys(paymentStats), ...Object.keys(payoutStats)]);
-                    this.upiAccountSet = new Set(Object.values(refStats).map(g => g.accountName));
+                    const allAccountKeys = new Set([...Object.keys(refStats), ...Object.keys(paymentStats), ...Object.keys(payoutStats)]);
+                    this.upiAccountSet = new Set(Object.keys(refStats));
 
-                    this.masterResultData = Array.from(allKeys).map(key => {
-                        const [, merchantNo, account] = key.split('|');
-                        const refGroup = refStats[key] || { channelId: 'N/A', '自动': { count: 0, totalAmount: 0 }, '收银台': { count: 0, totalAmount: 0 }, 'TG补单': { count: 0, totalAmount: 0 }, '未匹配': { count: 0, totalAmount: 0 } };
-                        const paymentData = paymentStats[key] || { '成功': { count: 0, totalAmount: 0 }, '已发送': { count: 0, totalAmount: 0 }};
-                        const payoutData = payoutStats[key] || { count: 0, totalAmount: 0 };
+                    this.masterResultData = Array.from(allAccountKeys).map(account => {
+                        const refGroup = refStats[account] || { channelId: 'N/A', merchantNo: 'N/A', '自动': { count: 0, totalAmount: 0 }, '收银台': { count: 0, totalAmount: 0 }, 'TG补单': { count: 0, totalAmount: 0 }, '未匹配': { count: 0, totalAmount: 0 } };
+                        const paymentData = paymentStats[account] || { '成功': { count: 0, totalAmount: 0 }, '已发送': { count: 0, totalAmount: 0 }};
+                        const payoutData = payoutStats[account] || { count: 0, totalAmount: 0 };
                         const totalUpiCount = Object.values(refGroup).reduce((acc, val) => acc + (val.count || 0), 0);
                         const paymentSuccessCount = paymentData['成功'].count;
                         const paymentSentCount = paymentData['已发送'].count;
                         return {
-                            'Channel ID': refGroup.channelId, 'Merchant No': merchantNo, '银行账户': account,
+                            'Channel ID': refGroup.channelId, 'Merchant No': refGroup.merchantNo, '银行账户': account,
                             '转入金额': paymentData['成功'].totalAmount, '转出金额': payoutData.totalAmount,
                             '代收成功-笔': paymentSuccessCount, '代收已发送-笔': paymentSentCount, '代收成功率': (paymentSuccessCount + paymentSentCount) > 0 ? `${calculateRate(paymentSuccessCount, paymentSuccessCount + paymentSentCount).toFixed(2)}%` : '0.00%',
                             '成功金额 (自动)': refGroup['自动'].totalAmount, '成功率 (自动)': totalUpiCount > 0 ? `${calculateRate(refGroup['自动'].count, totalUpiCount).toFixed(2)}%` : '0.00%',
@@ -449,7 +497,7 @@
                             '未匹配-笔': refGroup['未匹配'].count, '未匹配-金': refGroup['未匹配'].totalAmount,
                             '总笔数 (UPI)': totalUpiCount, '总金额 (UPI)': Object.values(refGroup).reduce((acc, val) => acc + (val.totalAmount || 0), 0),
                         };
-                    }).sort((a,b) => String(a['银行账户']).localeCompare(String(b['银行账户'])) || String(a['Merchant No']).localeCompare(String(b['Merchant No'])));
+                    }).sort((a,b) => String(a['银行账户']).localeCompare(String(b['银行账户'])));
 
                     document.getElementById('show-all-accounts-toggle').checked = false;
                     this.toggleView();
@@ -475,7 +523,7 @@
             controlsDiv.style.borderBottom = '1px solid #eee';
             resultsContainer.innerHTML = '';
             controlsDiv.innerHTML = `
-                <button id="back-to-selection-btn">← 返回选择</button>
+                <button id="back-to-selection-btn">↩ 返回</button>
                 <label for="stats-date-input" style="font-weight: bold;">选择日期:</label>
                 <input type="date" id="stats-date-input" value="${getTodayString()}">
                 <label class="filter-label">账户状态:</label>
@@ -519,6 +567,7 @@
                         const td = document.createElement('td');
                         const value = rowData[key];
                         let formattedValue = value;
+
                         if (key.includes('(₹)') || key.includes('均额')) {
                             td.classList.add('col-number');
                             if (key.includes('均额')) td.classList.add('col-secondary');
@@ -526,15 +575,15 @@
                         } else if (key.includes('(笔)')) {
                             td.classList.add('col-number', 'col-secondary');
                             formattedValue = formatInteger(value);
-                        } else if (key.includes('率')) {
+                        } else if (key === '代收成功率' || key === '代付成功率') {
                             td.classList.add('col-number', 'col-rate');
-                            const rate = parseFloat(value);
+                            const rate = parseFloat(value) || 0;
+                            formattedValue = formatPercent(rate);
                             if (key === '代收成功率') {
                                 if (rate >= 40) td.classList.add('rate-high'); else if (rate >= 30) td.classList.add('rate-medium'); else if (rate > 0) td.classList.add('rate-low');
                             } else if (key === '代付成功率') {
                                 if (rate >= 80) td.classList.add('rate-high'); else if (rate >= 50) td.classList.add('rate-medium'); else if (rate > 0) td.classList.add('rate-low');
                             }
-                            formattedValue = formatPercent(value);
                         } else if (key === '账户状态') {
                             td.classList.add('col-center');
                             const statusNum = Object.keys(this.STATUS_MAP).find(k => this.STATUS_MAP[k] === value);
@@ -560,11 +609,7 @@
                         }
 
                         td.innerText = formattedValue;
-                        td.addEventListener('contextmenu', e => { e.preventDefault(); navigator.clipboard.writeText(td.innerText).then(() => {
-                                let feedback = td.querySelector('.copy-feedback'); if (!feedback) { feedback = document.createElement('div'); feedback.className = 'copy-feedback'; feedback.innerText = '已复制!'; td.appendChild(feedback); }
-                                feedback.style.opacity = '1'; setTimeout(() => { feedback.style.opacity = '0'; }, 1000);
-                            });
-                        });
+                        addCopyToCell(td);
                         row.appendChild(td);
                     });
                     tbody.appendChild(row);
@@ -613,7 +658,8 @@
         async runReport() {
             const startGenBtn = document.getElementById('start-generation-btn');
             startGenBtn.disabled = true; uiElements.statsButton.disabled = true; startGenBtn.innerText = '正在生成...';
-            uiElements.resultsContainer.innerHTML = `<div id="progress-container"><div id="progress-bar"><div id="progress-bar-inner"></div></div><div id="progress-text">正在初始化...</div></div>`;
+            showSkeletonLoader(14);
+
             const token = localStorage.getItem('token');
             if (!token) { alert('无法获取Token，请重新登录。'); startGenBtn.disabled = false; uiElements.statsButton.disabled = false; startGenBtn.innerText = '生成报表'; return; }
 
@@ -622,7 +668,7 @@
                 const diffDays = Math.round((new Date(this.currentReportDate) - new Date(BASE_DATE_STR)) / ONE_DAY_MS);
                 const dateBegin = BASE_TIMESTAMP + diffDays * ONE_DAY_MS;
 
-                updateProgressBar(10, '阶段 1/2: 获取所有商户列表...');
+                uiElements.resultsContainer.innerHTML = `<div id="progress-container"><div id="progress-bar"><div id="progress-bar-inner"></div></div><div id="progress-text">阶段 1/2: 获取所有商户列表...</div></div>`;
                 let allMerchantsRaw = [];
                 for (let page = 1; ; page++) {
                     const url = `https://admin.gdspay.xyz/api/merchant/v1/list?page=${page}&pageSize=${PAGE_SIZE}`;
@@ -643,11 +689,11 @@
                     return;
                 }
 
-                updateProgressBar(50, `阶段 2/2: 获取每日汇总...`);
+                uiElements.resultsContainer.innerHTML = `<div id="progress-container"><div id="progress-bar"><div id="progress-bar-inner"></div></div><div id="progress-text">阶段 2/2: 获取每日汇总...</div></div>`;
                 const allMerchantIds = filteredMerchants.map(m => m.merchantId);
                 const statsMap = new Map();
                 for (let i = 0; i < allMerchantIds.length; i += this.STATS_API_BATCH_SIZE) {
-                    const progress = 50 + (i / allMerchantIds.length) * 50;
+                    const progress = (i / allMerchantIds.length) * 100;
                     updateProgressBar(progress, `阶段 2/2: 批次 ${Math.floor(i/this.STATS_API_BATCH_SIZE) + 1}/${Math.ceil(allMerchantIds.length / this.STATS_API_BATCH_SIZE)}`);
                     const batchIds = allMerchantIds.slice(i, i + this.STATS_API_BATCH_SIZE);
                     const statsUrl = `https://admin.gdspay.xyz/api/gateway/v1/statistics/summary/merchant?merchantIds=[${batchIds.join(',')}]&dateBegin=${dateBegin}&monthly=false`;
@@ -663,10 +709,8 @@
                     const payoutAmount = stats.payoutAmountComplete / 100, payoutCount = stats.payoutNumberComplete;
                     const commission = stats.commissionFlow / 100;
                     const balanceChange = stats.balanceFlow / 100;
-
                     const calculatedChange = paymentAmount - payoutAmount - commission;
                     const difference = balanceChange - calculatedChange;
-
                     return {
                         '商户ID': m.merchantId, '商户名称': m.merchantName, '账户状态': this.STATUS_MAP[m.status] || '未知',
                         '代收成功(笔)': paymentCount, '代收成功 (₹)': paymentAmount, '代收均额 (₹)': paymentCount > 0 ? paymentAmount / paymentCount : 0,
@@ -681,9 +725,7 @@
                         '可用余额 (₹)': m.availableBalance / 100,
                     };
                 }).sort((a,b) => b['账变 (₹)'] - a['账变 (₹)']);
-
                 this.displayResults();
-
             } catch (error) {
                 uiElements.resultsContainer.innerHTML = `<h2>发生严重错误</h2><p>${error.message}</p><p style="margin-top:10px; color: #666;"><b>常见原因：</b>登录凭证(Token)已过期。请尝试<b>退出并重新登录</b>，稍后再试。</p>`;
             } finally {
@@ -696,10 +738,7 @@
     // IV. 账户-商户成功率模块
     // =========================================================================
     const accountMerchantRateReport = {
-        masterResultData: [],
-        currentFilteredData: [],
-        currentReportDate: '',
-        BATCH_SIZE: 50,
+        masterResultData: [], currentFilteredData: [], currentReportDate: '', BATCH_SIZE: 50,
 
         initControls() {
             const { controlsDiv, resultsContainer } = uiElements;
@@ -707,17 +746,16 @@
             controlsDiv.style.borderBottom = '1px solid #eee';
             resultsContainer.innerHTML = '';
             controlsDiv.innerHTML = `
-                <button id="back-to-selection-btn">← 返回选择</button>
+                <button id="back-to-selection-btn">↩ 返回</button>
                 <label for="stats-date-input" style="font-weight: bold;">选择日期:</label>
                 <input type="date" id="stats-date-input" value="${getTodayString()}">
-                <input type="text" id="table-search-input" placeholder="搜索账户/商户/编号..." style="display: none;">
                 <button id="start-generation-btn">生成报表</button>
+                <input type="text" id="table-search-input" placeholder="搜索账户/商户/编号..." style="display: none;">
             `;
             document.getElementById('back-to-selection-btn').addEventListener('click', showReportSelection);
             document.getElementById('start-generation-btn').addEventListener('click', () => this.runReport());
             document.getElementById('table-search-input').addEventListener('input', (e) => this.filterTable(e.target.value));
         },
-
         async runReport() {
             const startGenBtn = document.getElementById('start-generation-btn');
             const dateInput = document.getElementById('stats-date-input');
@@ -726,7 +764,7 @@
             startGenBtn.disabled = true; uiElements.statsButton.disabled = true; startGenBtn.innerText = '正在生成...';
             searchInput.style.display = 'none';
             searchInput.value = '';
-            uiElements.resultsContainer.innerHTML = `<div id="progress-container"><div id="progress-bar"><div id="progress-bar-inner"></div></div><div id="progress-text">正在初始化...</div></div>`;
+            showSkeletonLoader(6);
             const token = localStorage.getItem('token');
             if (!token) { alert('无法获取Token，请重新登录。'); startGenBtn.disabled = false; uiElements.statsButton.disabled = false; startGenBtn.innerText = '生成报表'; return; }
 
@@ -736,6 +774,7 @@
                 const dateBegin = BASE_TIMESTAMP + diffDays * ONE_DAY_MS;
                 const url = 'https://admin.gdspay.xyz/api/gateway/v1/payment/list';
 
+                uiElements.resultsContainer.innerHTML = `<div id="progress-container"><div id="progress-bar"><div id="progress-bar-inner"></div></div><div id="progress-text">正在初始化...</div></div>`;
                 const firstPageBody = JSON.stringify({ dateBegin, dateEnd: dateBegin, page: 1, pageSize: PAGE_SIZE });
                 const firstPageOptions = { method: 'POST', headers: { "accept": "application/json", "content-type": "application/json", "authorization": token }, body: firstPageBody };
                 const firstPageRes = await fetchWithRetry(url, firstPageOptions, '支付列表 p1');
@@ -790,13 +829,14 @@
                 }
 
                 this.masterResultData = Object.values(stats).map(item => ({
+                    '商户编号': item.merchantNo,
                     '银行账户': item.tripartiteAccount,
                     '商户名称': item.merchantName,
-                    'Merchant No': item.merchantNo,
                     '成功笔数': item.success,
                     '总笔数': item.total,
                     '成功率': calculateRate(item.success, item.total),
-                })).sort((a, b) => a['银行账户'].localeCompare(b['银行账户']) || b['成功率'] - a['成功率']);
+                })).sort((a, b) => String(a['商户编号']).localeCompare(String(b['商户编号'])) || a['银行账户'].localeCompare(b['银行账户']));
+
 
                 this.currentFilteredData = [...this.masterResultData];
                 searchInput.style.display = 'inline-block';
@@ -808,7 +848,6 @@
                 startGenBtn.disabled = false; uiElements.statsButton.disabled = false; startGenBtn.innerText = '生成报表';
             }
         },
-
         renderTable(title, data) {
             const { resultsContainer } = uiElements;
             resultsContainer.innerHTML = `<h1>${title}</h1>`;
@@ -834,28 +873,25 @@
                         const td = document.createElement('td');
                         const value = rowData[key];
                         let formattedValue = value;
+
                         if (key.includes('笔数')) {
                             td.classList.add('col-number');
                             formattedValue = formatInteger(value);
                         } else if (key.includes('率')) {
                             td.classList.add('col-number', 'col-rate');
-                            const rate = parseFloat(value);
+                            const rate = parseFloat(value) || 0;
+                            formattedValue = formatPercent(rate);
                             if (rate >= 80) td.classList.add('rate-high');
                             else if (rate >= 50) td.classList.add('rate-medium');
                             else if (rate > 0) td.classList.add('rate-low');
-                            formattedValue = formatPercent(value);
                         } else {
                             td.classList.add('col-text');
-                            if (key === '银行账户' || key === '商户名称') {
+                            if (key === '银行账户' || key === '商户名称' || key === '商户编号') {
                                 td.classList.add('col-primary-text');
                             }
                         }
                         td.innerText = formattedValue;
-                        td.addEventListener('contextmenu', e => { e.preventDefault(); navigator.clipboard.writeText(td.innerText).then(() => {
-                                let feedback = td.querySelector('.copy-feedback'); if (!feedback) { feedback = document.createElement('div'); feedback.className = 'copy-feedback'; feedback.innerText = '已复制!'; td.appendChild(feedback); }
-                                feedback.style.opacity = '1'; setTimeout(() => { feedback.style.opacity = '0'; }, 1000);
-                            });
-                        });
+                        addCopyToCell(td);
                         row.appendChild(td);
                     });
                     tbody.appendChild(row);
@@ -888,13 +924,12 @@
             populateTbody(data);
             resultsContainer.appendChild(table);
         },
-
         filterTable(searchTerm) {
             const lowerCaseSearchTerm = searchTerm.toLowerCase();
             this.currentFilteredData = this.masterResultData.filter(row => {
                 const accountCell = row['银行账户'].toLowerCase();
                 const merchantCell = row['商户名称'].toLowerCase();
-                const merchantNoCell = String(row['Merchant No']).toLowerCase(); // 确保是字符串
+                const merchantNoCell = String(row['商户编号']).toLowerCase();
                 return accountCell.includes(lowerCaseSearchTerm) || merchantCell.includes(lowerCaseSearchTerm) || merchantNoCell.includes(lowerCaseSearchTerm);
             });
             this.renderTable(`账户-商户成功率 (${this.currentReportDate})`, this.currentFilteredData);
