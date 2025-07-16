@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GDSPay Admin Helper (Translate & Copy)
 // @namespace    http://tampermonkey.net/
-// @version      1.5 // Refactored transfer page copy to use Event Delegation for dynamic content
+// @version      1.8 // Refactored transfer page copy to use Event Delegation for dynamic content
 // @description  Replaces Chinese text on payout pages (with toggle), and adds copy-on-click for amounts and account numbers on the transfer list page.
 // @author       Your Name
 // @match        https://admin.gdspay.xyz/payout/*
