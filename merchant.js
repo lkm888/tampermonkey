@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         GDS 综合报表工具集 (最终UI统一版)
-// @namespace    gds-comprehensive-report-toolkit-final-ui-unified
-// @version      31.0
-// @description  【最终完美版】统一所有控件布局！将搜索框也移至左侧，实现所有报表操作栏的视觉与交互的完全统一。
+// @name         GDS 综合报表工具集 (四合一功能版)
+// @namespace    gds-comprehensive-report-toolkit-4-in-1
+// @version      33.0
+// @description  【四合一终极版】新增强大的“划转统计”报表，带转出账户过滤器。全面统一UI、加载动画和交互体验。
 // @author       Your Name
 // @match        https://admin.gdspay.xyz/aa*
 // @grant        none
@@ -35,7 +35,7 @@
             #start-generation-btn { font-size: 16px; padding: 8px 15px; background-color: #28a745; color: white; border: none; border-radius: 4px; cursor: pointer; transition: all 0.2s ease-in-out; }
             #start-generation-btn:hover { background-color: #218838; transform: translateY(-2px); box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
             #start-generation-btn:disabled { background-color: #cccccc; transform: none; box-shadow: none; }
-            #table-search-input { font-size: 16px; padding: 8px; border: 1px solid #ccc; border-radius: 4px; }
+            #table-search-input, #transfer-account-filter { font-size: 16px; padding: 8px; border: 1px solid #ccc; border-radius: 4px; }
 
             .report-selection-container { display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 20px; padding: 20px; width: 100%; }
             .report-selection-row { display: flex; justify-content: center; align-items: center; gap: 30px; }
@@ -44,11 +44,11 @@
             #select-reconciliation-report { background-color: #28a745; color: white; border-color: #218838; }
             #select-merchant-report { background-color: #17a2b8; color: white; border-color: #138496; }
             #select-account-merchant-rate-report { background-color: #ffc107; color: #212529; border-color: #e0a800; }
+            #select-transfer-report { background-color: #6610f2; color: white; border-color: #5108d4; }
             #back-to-selection-btn { background: #6c757d; color: white; border: none; font-size: 14px; padding: 8px 12px; margin-right: 10px; border-radius: 4px; display: flex; align-items: center; gap: 5px; transition: all 0.2s ease-in-out; }
             #back-to-selection-btn:hover { background: #5a6268; transform: translateY(-2px); }
 
             /* Rich Table Visual Styles */
-            #stats-results-container { display: flex; flex-direction: column; align-items: center; }
             #stats-results-container h1 { width: 100%; text-align: left; border-bottom: 2px solid #007BFF; padding-bottom: 10px; margin-top: 10px; margin-bottom: 15px; color: #333; }
             #stats-results-container table { display: inline-block; border-collapse: collapse; margin-bottom: 20px; font-size: 12px; max-width: 100%; overflow-x: auto;}
             #stats-results-container td { position: relative; }
@@ -83,7 +83,7 @@
             .skeleton-table .skeleton-row { display: flex; padding: 10px 0; border-bottom: 1px solid #e0e0e0; }
             .skeleton-table .skeleton-cell { height: 20px; background: linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%); background-size: 200% 100%; animation: skeleton-shine 1.5s infinite; border-radius: 4px; margin: 0 5px; }
             @keyframes skeleton-shine { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
-            
+
             #copy-tooltip {
                 position: fixed;
                 background-color: rgba(0, 0, 0, 0.75);
@@ -148,6 +148,8 @@
                 merchantReport.initControls();
             } else if (lastReport === 'accountMerchantRate') {
                 accountMerchantRateReport.initControls();
+            } else if (lastReport === 'transfer') {
+                transferReport.initControls();
             } else {
                 showReportSelection();
             }
@@ -173,6 +175,7 @@
                 </div>
                 <div class="report-selection-row">
                     <button id="select-account-merchant-rate-report" class="report-selection-btn">账户-商户成功率</button>
+                    <button id="select-transfer-report" class="report-selection-btn">划转统计</button>
                 </div>
             </div>
         `;
@@ -190,8 +193,12 @@
             localStorage.setItem(LAST_REPORT_KEY, 'accountMerchantRate');
             accountMerchantRateReport.initControls();
         });
+        document.getElementById('select-transfer-report').addEventListener('click', () => {
+            localStorage.setItem(LAST_REPORT_KEY, 'transfer');
+            transferReport.initControls();
+        });
     }
-    
+
     function showSkeletonLoader(columns = 8) {
         if (!uiElements) return;
         const { resultsContainer } = uiElements;
@@ -207,14 +214,14 @@
         skeletonHTML += '</div>';
         resultsContainer.innerHTML = skeletonHTML;
     }
-    
+
     function addCopyToCell(td) {
         td.addEventListener('contextmenu', e => {
             e.preventDefault();
             const valueToCopy = td.innerText;
             navigator.clipboard.writeText(valueToCopy).then(() => {
                 clearTimeout(tooltipTimeout);
-                
+
                 copyTooltip.innerHTML = `已复制: <br><b>${valueToCopy}</b>`;
                 copyTooltip.style.left = `${e.clientX}px`;
                 copyTooltip.style.top = `${e.clientY}px`;
@@ -393,7 +400,7 @@
                         } else {
                             td.classList.add('col-text');
                         }
-                        
+
                         if (key === '银行账户') td.classList.add('col-primary-text');
                         if (key === '转入金额') td.classList.add('col-profit');
                         if (key === '转出金额') td.classList.add('col-loss');
@@ -407,7 +414,7 @@
                             const rate = parseFloat(value);
                             if (rate >= 40) td.classList.add('rate-high'); else if (rate >= 30) td.classList.add('rate-medium'); else if (rate > 0 || (typeof value === 'string' && value !== '0.00%')) td.classList.add('rate-low');
                         }
-                        
+
                         td.innerText = formattedValue;
                         addCopyToCell(td);
                         row.appendChild(td);
@@ -504,7 +511,7 @@
 
                     const allAccountKeys = new Set([...Object.keys(refStats), ...Object.keys(paymentStats), ...Object.keys(payoutStats)]);
                     this.upiAccountSet = new Set(Object.keys(refStats));
-                    
+
                     this.masterResultData = Array.from(allAccountKeys).map(account => {
                         const refGroup = refStats[account] || { channelId: 'N/A', merchantNo: 'N/A', '自动': { count: 0, totalAmount: 0 }, '收银台': { count: 0, totalAmount: 0 }, 'TG补单': { count: 0, totalAmount: 0 }, '未匹配': { count: 0, totalAmount: 0 } };
                         const paymentData = paymentStats[account] || { '成功': { count: 0, totalAmount: 0 }, '已发送': { count: 0, totalAmount: 0 }};
@@ -594,7 +601,7 @@
                         const td = document.createElement('td');
                         const value = rowData[key];
                         let formattedValue = value;
-                        
+
                         if (key.includes('(₹)') || key.includes('均额')) {
                             td.classList.add('col-number');
                             if (key.includes('均额')) td.classList.add('col-secondary');
@@ -900,7 +907,7 @@
                         const td = document.createElement('td');
                         const value = rowData[key];
                         let formattedValue = value;
-                        
+
                         if (key.includes('笔数')) {
                             td.classList.add('col-number');
                             formattedValue = formatInteger(value);
@@ -960,6 +967,215 @@
                 return accountCell.includes(lowerCaseSearchTerm) || merchantCell.includes(lowerCaseSearchTerm) || merchantNoCell.includes(lowerCaseSearchTerm);
             });
             this.renderTable(`账户-商户成功率 (${this.currentReportDate})`, this.currentFilteredData);
+        }
+    };
+
+    // =========================================================================
+    // V. 划转统计模块
+    // =========================================================================
+    const transferReport = {
+        masterResultData: [], currentFilteredData: [], currentReportDate: '', BATCH_SIZE: 100,
+
+        initControls() {
+            const { controlsDiv, resultsContainer } = uiElements;
+            controlsDiv.innerHTML = '';
+            controlsDiv.style.borderBottom = '1px solid #eee';
+            resultsContainer.innerHTML = '';
+            controlsDiv.innerHTML = `
+                <button id="back-to-selection-btn">↩ 返回</button>
+                <label for="stats-date-input" style="font-weight: bold;">选择日期:</label>
+                <input type="date" id="stats-date-input" value="${getTodayString()}">
+                <input type="text" id="transfer-account-filter" placeholder="筛选转出账户(多个用,分隔)">
+                <button id="start-generation-btn">生成报表</button>
+            `;
+            document.getElementById('back-to-selection-btn').addEventListener('click', showReportSelection);
+            document.getElementById('start-generation-btn').addEventListener('click', () => this.runReport());
+            document.getElementById('transfer-account-filter').addEventListener('input', (e) => this.filterTable(e.target.value));
+        },
+        async runReport() {
+            const startGenBtn = document.getElementById('start-generation-btn');
+            const dateInput = document.getElementById('stats-date-input');
+            const filterInput = document.getElementById('transfer-account-filter');
+
+            startGenBtn.disabled = true; uiElements.statsButton.disabled = true; startGenBtn.innerText = '正在生成...';
+            filterInput.value = '';
+            showSkeletonLoader(8);
+            const token = localStorage.getItem('token');
+            if (!token) { alert('无法获取Token，请重新登录。'); startGenBtn.disabled = false; uiElements.statsButton.disabled = false; startGenBtn.innerText = '生成报表'; return; }
+
+            try {
+                this.currentReportDate = dateInput.value;
+                const diffDays = Math.round((new Date(this.currentReportDate) - new Date(BASE_DATE_STR)) / ONE_DAY_MS);
+                const dateBegin = BASE_TIMESTAMP + diffDays * ONE_DAY_MS;
+                const dateEnd = dateBegin;
+
+                const allTransfers = [];
+                let currentPage = 1;
+                while (true) {
+                    const url = `https://admin.gdspay.xyz/api/tripartite/v1/transfer/list?dateBegin=${dateBegin}&dateEnd=${dateEnd}&page=${currentPage}&pageSize=${PAGE_SIZE}`;
+                    const res = await fetchWithRetry(url, { headers: { "authorization": token } }, `划转列表 p${currentPage}`);
+                    const transfers = res?.data?.list || [];
+                    if (transfers.length > 0) {
+                        allTransfers.push(...transfers);
+                    }
+                    if (!res?.data?.page || transfers.length < PAGE_SIZE) {
+                        break;
+                    }
+                    currentPage++;
+                    await sleep(this.REQUEST_DELAY);
+                }
+
+                if (allTransfers.length === 0) {
+                    this.masterResultData = [];
+                    this.currentFilteredData = [];
+                    this.renderTable(`划转统计 (${this.currentReportDate})`, []);
+                    return;
+                }
+
+                const stats = {};
+                const MODE_MAP = { 1: 'IMPS', 2: 'NEFT', 3: 'RTGS' };
+
+                for (const transfer of allTransfers) {
+                    const { accountName, status, transferMode, amount } = transfer;
+                    if (!accountName) continue;
+
+                    if (!stats[accountName]) {
+                        stats[accountName] = {
+                            '转出账户': accountName,
+                            'IMPS 成功 (₹)': 0, 'IMPS 失败 (₹)': 0,
+                            'NEFT 成功 (₹)': 0, 'NEFT 失败 (₹)': 0,
+                            'RTGS 成功 (₹)': 0, 'RTGS 失败 (₹)': 0,
+                            '成功总金额 (₹)': 0,
+                        };
+                    }
+
+                    const mode = MODE_MAP[transferMode];
+                    if (!mode) continue;
+
+                    const statusKey = status === 3 ? '成功' : status === 4 ? '失败' : null;
+                    if (!statusKey) continue;
+
+                    const amountInRupees = amount / 100;
+                    stats[accountName][`${mode} ${statusKey} (₹)`] += amountInRupees;
+
+                    if (status === 3) {
+                        stats[accountName]['成功总金额 (₹)'] += amountInRupees;
+                    }
+                }
+
+                this.masterResultData = Object.values(stats).sort((a,b) => a['转出账户'].localeCompare(b['转出账户']));
+                this.currentFilteredData = [...this.masterResultData];
+                this.renderTable(`划转统计 (${this.currentReportDate})`, this.currentFilteredData);
+
+            } catch (error) {
+                uiElements.resultsContainer.innerHTML = `<h2>发生严重错误</h2><p>${error.message}</p>`;
+            } finally {
+                startGenBtn.disabled = false; uiElements.statsButton.disabled = false; startGenBtn.innerText = '生成报表';
+            }
+        },
+        renderTable(title, data) {
+             const { resultsContainer } = uiElements;
+            resultsContainer.innerHTML = `<h1>${title}</h1>`;
+
+            if (!this.masterResultData || this.masterResultData.length === 0) {
+                 resultsContainer.innerHTML += '<p>没有找到任何数据。</p>'; return;
+            }
+            if (data.length === 0) {
+                 resultsContainer.innerHTML += '<p>没有符合筛选条件的数据。</p>';
+            }
+
+            const table = document.createElement('table');
+            const thead = document.createElement('thead');
+            const tbody = document.createElement('tbody');
+            const tfoot = document.createElement('tfoot');
+            table.append(thead, tbody, tfoot);
+            const headers = Object.keys(this.masterResultData[0] || {});
+
+            const populateTbody = (dataToRender) => {
+                tbody.innerHTML = '';
+                dataToRender.forEach(rowData => {
+                    const row = document.createElement('tr');
+                    headers.forEach(key => {
+                        const td = document.createElement('td');
+                        const value = rowData[key];
+
+                        if(key === '转出账户') {
+                            td.classList.add('col-text', 'col-primary-text');
+                            td.innerText = value;
+                        } else {
+                            td.classList.add('col-number');
+                            td.innerText = formatCurrency(value);
+                            if(key.includes('成功') && value > 0) td.classList.add('col-profit');
+                            if(key.includes('失败') && value > 0) td.classList.add('col-loss');
+                            if(key === '成功总金额 (₹)') td.classList.add('col-highlight');
+                        }
+
+                        addCopyToCell(td);
+                        row.appendChild(td);
+                    });
+                    tbody.appendChild(row);
+                });
+            };
+
+            const headerRow = document.createElement('tr');
+            headers.forEach(key => {
+                const th = document.createElement('th');
+                th.innerText = key;
+                th.dataset.key = key;
+                headerRow.appendChild(th);
+                th.addEventListener('click', e => {
+                    const sortKey = e.currentTarget.dataset.key;
+                    const currentSortDir = table.dataset.sortKey === sortKey && table.dataset.sortDir === 'asc' ? 'desc' : 'asc';
+                    table.dataset.sortKey = sortKey; table.dataset.sortDir = currentSortDir;
+
+                    this.currentFilteredData.sort((a, b) => {
+                        const valA = a[sortKey], valB = b[sortKey];
+                        const r = (typeof valA === 'number' && typeof valB === 'number') ? valA - valB : String(valA).localeCompare(String(valB), undefined, { numeric: true });
+                        return currentSortDir === 'asc' ? r : -r;
+                    });
+
+                    thead.querySelectorAll('th').forEach(h => h.classList.remove('sort-asc', 'sort-desc'));
+                    e.currentTarget.classList.add(currentSortDir === 'asc' ? 'sort-asc' : 'sort-desc');
+                    populateTbody(this.currentFilteredData);
+                });
+            });
+            thead.appendChild(headerRow);
+
+            const totals = {};
+            headers.forEach(header => {
+                if(header !== '转出账户'){
+                    totals[header] = data.reduce((sum, row) => sum + (row[header] || 0), 0);
+                }
+            });
+
+            const footerRow = document.createElement('tr');
+            headers.forEach((header, index) => {
+                const td = document.createElement('td');
+                if (index === 0) { td.innerText = `总计 (${data.length} 账户)`; td.classList.add('col-text'); }
+                else {
+                    td.innerText = formatCurrency(totals[header]);
+                    td.classList.add('col-number', 'col-highlight');
+                    if (header.includes('成功') && totals[header] > 0) td.classList.add('col-profit');
+                    if (header.includes('失败') && totals[header] > 0) td.classList.add('col-loss');
+                }
+                footerRow.appendChild(td);
+            });
+            tfoot.appendChild(footerRow);
+
+            populateTbody(data);
+            resultsContainer.appendChild(table);
+        },
+        filterTable(searchTerm) {
+            const filterTerms = searchTerm.toLowerCase().split(',').map(term => term.trim()).filter(term => term);
+            if (filterTerms.length === 0) {
+                this.currentFilteredData = [...this.masterResultData];
+            } else {
+                this.currentFilteredData = this.masterResultData.filter(row => {
+                    const accountNameLower = row['转出账户'].toLowerCase();
+                    return filterTerms.some(term => accountNameLower.includes(term));
+                });
+            }
+            this.renderTable(`划转统计 (${this.currentReportDate})`, this.currentFilteredData);
         }
     };
 
