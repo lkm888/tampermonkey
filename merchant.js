@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         GDS 综合报表工具集 (标题居中最终版)
-// @namespace    gds-comprehensive-report-toolkit-title-centered
-// @version      33.2
-// @description  【终极完美版】将报表标题也进行居中，实现从主菜单到报表内容的全链路视觉统一与和谐。
+// @name         GDS 综合报表工具集 (数据逻辑修复版)
+// @namespace    gds-comprehensive-report-toolkit-logic-fix
+// @version      33.3
+// @description  【逻辑修复】修复了“按银行账户统计”因新数据格式而遗漏部分UPI流水的问题，确保统计的完整性。
 // @author       Your Name
 // @match        https://admin.gdspay.xyz/aa*
 // @grant        none
@@ -50,7 +50,6 @@
 
             /* Rich Table Visual Styles */
             #stats-results-container { display: flex; flex-direction: column; align-items: center; }
-            /* --- 【UI修复】标题居中 --- */
             #stats-results-container h1 { width: 100%; text-align: center; border-bottom: 2px solid #007BFF; padding-bottom: 10px; margin-top: 10px; margin-bottom: 15px; color: #333; }
             #stats-results-container table { display: inline-block; border-collapse: collapse; margin-bottom: 20px; font-size: 12px; max-width: 100%; overflow-x: auto;}
             #stats-results-container td { position: relative; }
@@ -328,7 +327,9 @@
         processReferenceData(statistics, items) {
             const MATCH_SOURCE_MAP = { 0: '未匹配', 1: '自动', 3: '收银台', 4: 'TG补单' };
             for (const item of items) {
-                if (!item.txnDescription || !item.txnDescription.toUpperCase().startsWith('UPI')) continue;
+                // ---【逻辑修复】使用 .includes() 替代 .startsWith() 来匹配UPI流水 ---
+                if (!item.txnDescription || !item.txnDescription.toUpperCase().includes('UPI')) continue;
+                
                 const { channelId, merchantNo, accountName, matchSource, amount } = item;
                 const groupKey = accountName || 'N/A';
                 if (!statistics[groupKey]) {
