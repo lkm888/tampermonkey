@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         GDS 综合报表工具集 (数据逻辑修复版)
-// @namespace    gds-comprehensive-report-toolkit-logic-fix
-// @version      33.3
-// @description  【逻辑修复】修复了“按银行账户统计”因新数据格式而遗漏部分UPI流水的问题，确保统计的完整性。
+// @name         GDS 综合报表工具集 (截图增强最终版)
+// @namespace    gds-comprehensive-report-toolkit-screenshot-edition
+// @version      34.0
+// @description  【截图王牌版】新增一键截图功能！将完整的报表（包括滚动部分）高清截取并直接复制到剪贴板，方便分享与记录。
 // @author       Your Name
 // @match        https://admin.gdspay.xyz/aa*
 // @grant        none
@@ -19,6 +19,7 @@
     // =========================================================================
 
     const LAST_REPORT_KEY = 'gds_last_report_type';
+    let html2canvasPromise = null;
 
     function injectGlobalStyles() {
         const styles = `
@@ -32,9 +33,14 @@
             #stats-close-btn:hover { color: #333; }
             #stats-controls { display: flex; align-items: center; gap: 15px; margin-bottom: 20px; padding-bottom: 15px; border-bottom: 1px solid #eee; flex-wrap: wrap; justify-content: center; }
             #stats-date-input { font-size: 16px; padding: 8px; border: 1px solid #ccc; border-radius: 4px; }
-            #start-generation-btn { font-size: 16px; padding: 8px 15px; background-color: #28a745; color: white; border: none; border-radius: 4px; cursor: pointer; transition: all 0.2s ease-in-out; }
-            #start-generation-btn:hover { background-color: #218838; transform: translateY(-2px); box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-            #start-generation-btn:disabled { background-color: #cccccc; transform: none; box-shadow: none; }
+            .action-btn { font-size: 16px; padding: 8px 15px; color: white; border: none; border-radius: 4px; cursor: pointer; transition: all 0.2s ease-in-out; }
+            .action-btn:hover:not(:disabled) { transform: translateY(-2px); box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+            .action-btn:disabled { transform: none; box-shadow: none; background-color: #cccccc !important; cursor: not-allowed; }
+            #start-generation-btn { background-color: #28a745; }
+            #start-generation-btn:hover:not(:disabled) { background-color: #218838; }
+            #screenshot-btn { background-color: #007bff; }
+            #screenshot-btn:hover:not(:disabled) { background-color: #0056b3; }
+
             #table-search-input, #transfer-account-filter { font-size: 16px; padding: 8px; border: 1px solid #ccc; border-radius: 4px; }
 
             .report-selection-container { display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 20px; padding: 20px; width: 100%; }
@@ -235,6 +241,57 @@
         });
     }
 
+    // --- 【截图功能】核心函数 ---
+    function loadHtml2Canvas() {
+        if (html2canvasPromise) {
+            return html2canvasPromise;
+        }
+        html2canvasPromise = new Promise((resolve, reject) => {
+            if (typeof window.html2canvas === 'function') {
+                return resolve();
+            }
+            const script = document.createElement('script');
+            script.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js';
+            script.onload = () => resolve();
+            script.onerror = () => reject(new Error('无法加载 html2canvas 库'));
+            document.head.appendChild(script);
+        });
+        return html2canvasPromise;
+    }
+
+    async function captureAndCopyToClipboard(tableElement, buttonElement) {
+        const originalText = buttonElement.innerText;
+        buttonElement.innerText = '截取中...';
+        buttonElement.disabled = true;
+
+        try {
+            await loadHtml2Canvas();
+            const canvas = await window.html2canvas(tableElement, {
+                scale: 2, // 提高截图清晰度
+                useCORS: true,
+                backgroundColor: '#ffffff'
+            });
+            
+            const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+            
+            await navigator.clipboard.write([
+                new ClipboardItem({ 'image/png': blob })
+            ]);
+            
+            buttonElement.innerText = '已复制!';
+            setTimeout(() => {
+                buttonElement.innerText = originalText;
+            }, 1000);
+
+        } catch (err) {
+            console.error('截图或复制失败:', err);
+            alert(`截图失败: ${err.message}\n\n请确保浏览器允许访问剪贴板。`);
+            buttonElement.innerText = originalText;
+        } finally {
+            buttonElement.disabled = false;
+        }
+    }
+
     const MAX_RETRIES = 3, RETRY_DELAY = 500, PAGE_SIZE = 100;
     const BASE_DATE_STR = '2025-06-15', BASE_TIMESTAMP = 1749925800000, ONE_DAY_MS = 86400000;
     const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
@@ -286,7 +343,8 @@
                     <input type="checkbox" id="show-all-accounts-toggle">
                     显示所有账户 (完整模式)
                 </label>
-                <button id="start-generation-btn">生成报表</button>
+                <button id="start-generation-btn" class="action-btn">生成报表</button>
+                <button id="screenshot-btn" class="action-btn" disabled>截图</button>
             `;
             document.getElementById('back-to-selection-btn').addEventListener('click', showReportSelection);
             controlsDiv.querySelector('#show-all-accounts-toggle').addEventListener('change', () => this.toggleView());
@@ -327,7 +385,6 @@
         processReferenceData(statistics, items) {
             const MATCH_SOURCE_MAP = { 0: '未匹配', 1: '自动', 3: '收银台', 4: 'TG补单' };
             for (const item of items) {
-                // ---【逻辑修复】使用 .includes() 替代 .startsWith() 来匹配UPI流水 ---
                 if (!item.txnDescription || !item.txnDescription.toUpperCase().includes('UPI')) continue;
                 
                 const { channelId, merchantNo, accountName, matchSource, amount } = item;
@@ -372,8 +429,13 @@
         renderTable(title, dataToRender, fullDataForSorting) {
             const { resultsContainer } = uiElements;
             resultsContainer.innerHTML = `<h1>${title}</h1>`;
+            
+            const screenshotBtn = document.getElementById('screenshot-btn');
+            
             if (!fullDataForSorting || fullDataForSorting.length === 0) {
-                resultsContainer.innerHTML += '<p>没有找到任何数据。</p>'; return;
+                resultsContainer.innerHTML += '<p>没有找到任何数据。</p>'; 
+                if(screenshotBtn) screenshotBtn.disabled = true;
+                return;
             }
             const table = document.createElement('table');
             const thead = document.createElement('thead');
@@ -450,19 +512,21 @@
                 });
             });
             thead.appendChild(headerRow);
+            
             const totals = {};
             headers.forEach(header => {
                 if (header.includes('笔数') || header.includes('-笔') || header.includes('金额') || header.includes('-金')) {
-                    totals[header] = fullDataForSorting.reduce((sum, row) => sum + (row[header] || 0), 0);
+                    totals[header] = dataToRender.reduce((sum, row) => sum + (row[header] || 0), 0);
                 }
             });
             const totalPaymentSuccess = totals['代收成功-笔'] || 0;
             const totalPaymentSent = totals['代收已发送-笔'] || 0;
             totals['代收成功率'] = (totalPaymentSuccess + totalPaymentSent) > 0 ? `${calculateRate(totalPaymentSuccess, totalPaymentSuccess + totalPaymentSent).toFixed(2)}%` : '0.00%';
+            
             const footerRow = document.createElement('tr');
             headers.forEach((header, index) => {
                 const td = document.createElement('td');
-                if (index === 0) { td.innerText = '总计'; td.classList.add('col-text');}
+                if (index === 0) { td.innerText = `总计 (${dataToRender.length} 账户)`; td.classList.add('col-text');}
                 else {
                     const totalValue = totals[header];
                     if (totalValue !== undefined) td.innerText = (header.includes('金额') || header.includes('-金')) ? formatCurrency(totalValue) : (header.includes('笔数') || header.includes('-笔')) ? formatInteger(totalValue) : totalValue;
@@ -470,16 +534,25 @@
                 }
                 footerRow.appendChild(td);
             });
+            tfoot.innerHTML = '';
             tfoot.appendChild(footerRow);
+            
             populateTbody(dataToRender);
             resultsContainer.appendChild(table);
+
+            if(screenshotBtn) {
+                screenshotBtn.disabled = false;
+                screenshotBtn.onclick = () => captureAndCopyToClipboard(table, screenshotBtn);
+            }
         },
         async runReport() {
             const dateInput = document.getElementById('stats-date-input');
             const startGenBtn = document.getElementById('start-generation-btn');
             const toggleLabel = document.getElementById('view-toggle-label');
+            const screenshotBtn = document.getElementById('screenshot-btn');
 
             startGenBtn.disabled = true; uiElements.statsButton.disabled = true; startGenBtn.innerText = '正在统计...';
+            if(screenshotBtn) screenshotBtn.disabled = true;
             toggleLabel.style.display = 'none';
             showSkeletonLoader(18);
 
@@ -566,7 +639,8 @@
                 <label class="filter-label">账户状态:</label>
                 ${Object.entries(this.STATUS_MAP).map(([value, text]) => `<label class="status-filter-label"><input type="checkbox" data-status="${value}" checked>${text}</label>`).join('')}
                 <label class="filter-label"><input type="checkbox" id="filter-active-merchants" checked>仅显示活跃商户</label>
-                <button id="start-generation-btn">生成报表</button>
+                <button id="start-generation-btn" class="action-btn">生成报表</button>
+                <button id="screenshot-btn" class="action-btn" disabled>截图</button>
             `;
             document.getElementById('back-to-selection-btn').addEventListener('click', showReportSelection);
             document.getElementById('start-generation-btn').addEventListener('click', () => this.runReport());
@@ -587,8 +661,13 @@
         renderTable(title, data) {
             const { resultsContainer } = uiElements;
             resultsContainer.innerHTML = `<h1>${title}</h1>`;
+
+            const screenshotBtn = document.getElementById('screenshot-btn');
+
             if (!data || data.length === 0) {
-                resultsContainer.innerHTML += '<p>没有找到符合条件的数据。</p>'; return;
+                resultsContainer.innerHTML += '<p>没有找到符合条件的数据。</p>';
+                if(screenshotBtn) screenshotBtn.disabled = true;
+                return;
             }
             const table = document.createElement('table');
             const thead = document.createElement('thead');
@@ -691,10 +770,17 @@
             tfoot.appendChild(footerRow);
             populateTbody(data);
             resultsContainer.appendChild(table);
+
+            if(screenshotBtn) {
+                screenshotBtn.disabled = false;
+                screenshotBtn.onclick = () => captureAndCopyToClipboard(table, screenshotBtn);
+            }
         },
         async runReport() {
             const startGenBtn = document.getElementById('start-generation-btn');
+            const screenshotBtn = document.getElementById('screenshot-btn');
             startGenBtn.disabled = true; uiElements.statsButton.disabled = true; startGenBtn.innerText = '正在生成...';
+            if(screenshotBtn) screenshotBtn.disabled = true;
             showSkeletonLoader(14);
 
             const token = localStorage.getItem('token');
@@ -786,8 +872,9 @@
                 <button id="back-to-selection-btn">↩ 返回</button>
                 <label for="stats-date-input" style="font-weight: bold;">选择日期:</label>
                 <input type="date" id="stats-date-input" value="${getTodayString()}">
-                <input type="text" id="table-search-input" placeholder="搜索账户/商户/编号..." style="display: none;">
-                <button id="start-generation-btn">生成报表</button>
+                <input type="text" id="table-search-input" placeholder="搜索账户/商户/编号..." style="visibility: hidden;">
+                <button id="start-generation-btn" class="action-btn">生成报表</button>
+                <button id="screenshot-btn" class="action-btn" disabled>截图</button>
             `;
             document.getElementById('back-to-selection-btn').addEventListener('click', showReportSelection);
             document.getElementById('start-generation-btn').addEventListener('click', () => this.runReport());
@@ -797,9 +884,11 @@
             const startGenBtn = document.getElementById('start-generation-btn');
             const dateInput = document.getElementById('stats-date-input');
             const searchInput = document.getElementById('table-search-input');
+            const screenshotBtn = document.getElementById('screenshot-btn');
 
             startGenBtn.disabled = true; uiElements.statsButton.disabled = true; startGenBtn.innerText = '正在生成...';
-            searchInput.style.display = 'none';
+            if(screenshotBtn) screenshotBtn.disabled = true;
+            searchInput.style.visibility = 'hidden';
             searchInput.value = '';
             showSkeletonLoader(6);
             const token = localStorage.getItem('token');
@@ -876,7 +965,7 @@
 
 
                 this.currentFilteredData = [...this.masterResultData];
-                searchInput.style.display = 'inline-block';
+                searchInput.style.visibility = 'visible';
                 this.renderTable(`账户-商户成功率 (${this.currentReportDate})`, this.currentFilteredData);
 
             } catch (error) {
@@ -889,8 +978,12 @@
             const { resultsContainer } = uiElements;
             resultsContainer.innerHTML = `<h1>${title}</h1>`;
 
+            const screenshotBtn = document.getElementById('screenshot-btn');
+
             if (!this.masterResultData || this.masterResultData.length === 0) {
-                 resultsContainer.innerHTML += '<p>没有找到任何数据。</p>'; return;
+                 resultsContainer.innerHTML += '<p>没有找到任何数据。</p>'; 
+                 if(screenshotBtn) screenshotBtn.disabled = true;
+                 return;
             }
             if (data.length === 0) {
                  resultsContainer.innerHTML += '<p>没有符合搜索条件的数据。</p>';
@@ -960,6 +1053,11 @@
             thead.appendChild(headerRow);
             populateTbody(data);
             resultsContainer.appendChild(table);
+
+            if(screenshotBtn) {
+                screenshotBtn.disabled = false;
+                screenshotBtn.onclick = () => captureAndCopyToClipboard(table, screenshotBtn);
+            }
         },
         filterTable(searchTerm) {
             const lowerCaseSearchTerm = searchTerm.toLowerCase();
@@ -989,7 +1087,8 @@
                 <label for="stats-date-input" style="font-weight: bold;">选择日期:</label>
                 <input type="date" id="stats-date-input" value="${getTodayString()}">
                 <input type="text" id="transfer-account-filter" placeholder="筛选转出账户(多个用,分隔)">
-                <button id="start-generation-btn">生成报表</button>
+                <button id="start-generation-btn" class="action-btn">生成报表</button>
+                <button id="screenshot-btn" class="action-btn" disabled>截图</button>
             `;
             document.getElementById('back-to-selection-btn').addEventListener('click', showReportSelection);
             document.getElementById('start-generation-btn').addEventListener('click', () => this.runReport());
@@ -999,8 +1098,10 @@
             const startGenBtn = document.getElementById('start-generation-btn');
             const dateInput = document.getElementById('stats-date-input');
             const filterInput = document.getElementById('transfer-account-filter');
+            const screenshotBtn = document.getElementById('screenshot-btn');
 
             startGenBtn.disabled = true; uiElements.statsButton.disabled = true; startGenBtn.innerText = '正在生成...';
+            if(screenshotBtn) screenshotBtn.disabled = true;
             filterInput.value = '';
             showSkeletonLoader(8);
             const token = localStorage.getItem('token');
@@ -1080,8 +1181,12 @@
              const { resultsContainer } = uiElements;
             resultsContainer.innerHTML = `<h1>${title}</h1>`;
 
+            const screenshotBtn = document.getElementById('screenshot-btn');
+
             if (!this.masterResultData || this.masterResultData.length === 0) {
-                 resultsContainer.innerHTML += '<p>没有找到任何数据。</p>'; return;
+                 resultsContainer.innerHTML += '<p>没有找到任何数据。</p>'; 
+                 if(screenshotBtn) screenshotBtn.disabled = true;
+                 return;
             }
             if (data.length === 0) {
                  resultsContainer.innerHTML += '<p>没有符合筛选条件的数据。</p>';
@@ -1167,6 +1272,11 @@
 
             populateTbody(data);
             resultsContainer.appendChild(table);
+
+            if(screenshotBtn) {
+                screenshotBtn.disabled = false;
+                screenshotBtn.onclick = () => captureAndCopyToClipboard(table, screenshotBtn);
+            }
         },
         filterTable(searchTerm) {
             const filterTerms = searchTerm.toLowerCase().split(',').map(term => term.trim()).filter(term => term);
