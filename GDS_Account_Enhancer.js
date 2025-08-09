@@ -3,7 +3,7 @@
 // @namespace    http://tampermonkey.net/
 // @version      3.2.88
 // @description  [v3.2.88-refactored]: 基于 v3.2.87-mod10 重构。代码采用单文件模块化，提升可维护性；实现增量更新逻辑，在数据无变化时不重绘表格，实现“无感刷新”，优化性能。
-// @match        https://admin.gdspay.xyz/999*
+// @match        https://admin.gdspay.xyz/99*
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_xmlhttpRequest
@@ -1206,12 +1206,22 @@
                         balanceFailed: apiItem.balanceFailed,
                     };
 
+                    // [修复] 增加保护性检查，防止API偶然返回0时错误地覆盖数据
+                    if (!isInitialLoad && prev.balance > 0 && current.balance === 0) {
+                        console.warn(`GDS 脚本 (ID: ${accIdStr}): API 返回余额为 0，上次为 ${Utils.fmtAmt(prev.balance)}。使用上次的值。`);
+                        current.balance = prev.balance;
+                    }
+                    if (!isInitialLoad && prev.frozenBalance > 0 && current.frozenBalance === 0) {
+                        console.warn(`GDS 脚本 (ID: ${accIdStr}): API 返回冻结余额为 0，上次为 ${Utils.fmtAmt(prev.frozenBalance)}。使用上次的值。`);
+                        current.frozenBalance = prev.frozenBalance;
+                    }
+
                     if (isNewAccount) {
                         API.addLog(State.operationLogs, Config.STORES.OP_LOGS, Config.MAX_LOG_MEM, Config.MAX_LOG_DB, { accountId: accIdStr, accountName: current.accountName, message: '<span class="log-status-change">检测到新账户并已添加</span>' });
                     } else {
                         let logMsgParts = [];
                         if (prev.balance !== current.balance) { isDataChanged = true; const diff = current.balance - prev.balance; logMsgParts.push(`余额: ${Utils.fmtAmt(prev.balance)} → ${Utils.fmtAmt(current.balance)} <span class="${diff > 0 ? 'log-amount-increase' : 'log-amount-decrease'}">(${diff > 0 ? '+' : ''}${Utils.fmtAmt(diff)})</span>`); }
-                        if (prev.frozenBalance !== current.frozenBalance) { isDataChanged = true; const diff = current.frozenBalance - prev.frozenBalance; logMsgParts.push(`冻结: ${Utils.fmtAmt(prev.frozenBalance)} → ${Utils.fmtAmt(current.frozenBalance)} <span class="${diff > 0 ? 'log-amount-increase' : 'log-amount-decrease'}">(${diff > 0 ? '+' : ''}${Utils.fmtAmt(diff)})</span>`); if (diff > 0 && prev.frozenBalance >= 0) API.addLog(State.frozenBalanceIncreaseLogs, Config.STORES.FROZEN_LOGS, Config.MAX_FROZEN_LOG_MEM, Config.MAX_FROZEN_LOG_DB, { accountId: accIdStr, accountName: current.accountName, message: `冻结增加: ${Utils.fmtAmt(prev.frozenBalance)} → ${Utils.fmtAmt(current.frozenBalance)}` }); }
+                        if (prev.frozenBalance !== current.frozenBalance) { isDataChanged = true; const diff = current.frozenBalance - prev.frozenBalance; logMsgParts.push(`冻结: ${Utils.fmtAmt(prev.frozenBalance)} → ${Utils.fmtAmt(current.frozenBalance)} <span class="${diff > 0 ? 'log-amount-increase' : 'log-amount-decrease'}">(${diff > 0 ? '+' : ''}${Utils.fmtAmt(diff)})</span>`); if (diff > 0 && prev.frozenBalance >= 0 && !isInitialLoad) API.addLog(State.frozenBalanceIncreaseLogs, Config.STORES.FROZEN_LOGS, Config.MAX_FROZEN_LOG_MEM, Config.MAX_FROZEN_LOG_DB, { accountId: accIdStr, accountName: current.accountName, message: `冻结增加: ${Utils.fmtAmt(prev.frozenBalance)} → ${Utils.fmtAmt(current.frozenBalance)}` }); }
                         if (prev.apiStatus !== current.apiStatus) { isDataChanged = true; logMsgParts.push(`在线状态: ${Utils.fmtApiStatus(prev.apiStatus).text} → <span class="log-status-change">${Utils.fmtApiStatus(current.apiStatus).text}</span>`); }
                         if (prev.balanceFailed !== current.balanceFailed) { isDataChanged = true; logMsgParts.push(`余额查询失败: ${prev.balanceFailed ? '是' : '否'} → <span class="log-status-change">${current.balanceFailed ? '是' : '否'}</span>`); }
                         if (logMsgParts.length > 0) {
