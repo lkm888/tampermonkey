@@ -1,10 +1,11 @@
 // ==UserScript==
 // @name         GDS 交易列表集成版 (v1.5.1 - 补单优化)
 // @namespace    http://tampermonkey.net/
-// @version      1.5.1
+// @version      1.6.1
 // @description  在GDS页面内嵌交易列表。打款金额不能超过订单金额。Bank列匹配GDS账户。新增受益人选择，打款后按钮1分钟节流。金额无逗号。增加删除交易记录功能。使用IndexedDB存储数据，从GDS_EnhancedScriptDB/accountData按指定键读取账户缓存。操作日志现分面板显示、可搜索、清除和导出。新增“扣钱”按钮，将打款金额从订单金额中扣除并更新到本地。(v1.5.1: 优化补单面板，保持选择并移除补录确认框).
 // @match        https://admin.gdspay.xyz/2*
 // @grant        GM_xmlhttpRequest
+// @connect      gist.githubusercontent.com
 // @updateURL    https://raw.githubusercontent.com/lkm888/tampermonkey/main/交易.user.js
 // @downloadURL  https://raw.githubusercontent.com/lkm888/tampermonkey/main/交易.user.js
 // ==/UserScript==
@@ -82,6 +83,30 @@
   let bankBeneficiaryPanelLogs = [];
   let makeupPanelLogs = []; // 补单面板日志
   let currentLogDisplayType = 'transaction'; // 'transaction', 'bankBeneficiary', 'makeup'
+
+  const panelConfigs = {
+    transaction: {
+        name: '交易面板',
+        logKey: KEY_PERSISTENT_OPERATION_LOGS_TX,
+        getLogs: () => transactionPanelLogs,
+        setLogs: (logs) => { transactionPanelLogs = logs; },
+        getSearchInput: () => document.getElementById('embed-tx-search'),
+    },
+    bankBeneficiary: {
+        name: '银行受益人面板',
+        logKey: KEY_PERSISTENT_OPERATION_LOGS_BB,
+        getLogs: () => bankBeneficiaryPanelLogs,
+        setLogs: (logs) => { bankBeneficiaryPanelLogs = logs; },
+        getSearchInput: () => document.getElementById('bank-beneficiary-search'),
+    },
+    makeup: {
+        name: '补单面板',
+        logKey: KEY_PERSISTENT_OPERATION_LOGS_MU,
+        getLogs: () => makeupPanelLogs,
+        setLogs: (logs) => { makeupPanelLogs = logs; },
+        getSearchInput: () => null,
+    }
+  };
 
   let refreshIntervalId = null;
   let currentTheme = 'light';
@@ -448,25 +473,21 @@
   // --- 日志管理 ---
   async function addLogEntry(logEntry, persistToDB = false, panelType = 'transaction') {
     if (!logDisplayContainer) return;
+    const config = panelConfigs[panelType];
+    if (!config) { console.warn("addLogEntry: 无效的面板类型:", panelType); return; }
+
     logEntry.time = formatDateTime();
-
-    let targetLogs;
-    let dbKey;
-
-    if (panelType === 'transaction') { targetLogs = transactionPanelLogs; dbKey = KEY_PERSISTENT_OPERATION_LOGS_TX; }
-    else if (panelType === 'bankBeneficiary') { targetLogs = bankBeneficiaryPanelLogs; dbKey = KEY_PERSISTENT_OPERATION_LOGS_BB; }
-    else if (panelType === 'makeup') { targetLogs = makeupPanelLogs; dbKey = KEY_PERSISTENT_OPERATION_LOGS_MU; }
-    else { console.warn("addLogEntry: 无效的面板类型:", panelType); return; }
+    const targetLogs = config.getLogs();
 
     targetLogs.unshift(logEntry);
     if (targetLogs.length > MAX_LOG_ENTRIES) targetLogs.pop();
 
     if (persistToDB) {
       try {
-        let persistedLogs = (await embedTxDb.get(EMBED_TX_STORE_NAME, dbKey)) || [];
+        let persistedLogs = (await embedTxDb.get(EMBED_TX_STORE_NAME, config.logKey)) || [];
         persistedLogs.unshift(logEntry);
         if (persistedLogs.length > MAX_LOG_ENTRIES) persistedLogs = persistedLogs.slice(0, MAX_LOG_ENTRIES);
-        await embedTxDb.set(EMBED_TX_STORE_NAME, dbKey, persistedLogs);
+        await embedTxDb.set(EMBED_TX_STORE_NAME, config.logKey, persistedLogs);
       } catch (e) {
         console.error('保存持久日志到IDB失败:', e);
         targetLogs.unshift({ time: formatDateTime(), message: `<span class="log-error">保存持久日志失败: ${escapeHtml(e.message)}.</span>` });
@@ -478,14 +499,12 @@
 
   function renderLogs() {
     if (!logDisplayContainer) return;
+    const config = panelConfigs[currentLogDisplayType];
+    if (!config) return;
 
-    let logsToDisplay = [];
-    let searchInput = null;
-    let logTitle = '操作日志';
-
-    if (currentLogDisplayType === 'transaction') { logsToDisplay = transactionPanelLogs; searchInput = document.getElementById('embed-tx-search'); logTitle = '交易面板操作日志'; }
-    else if (currentLogDisplayType === 'bankBeneficiary') { logsToDisplay = bankBeneficiaryPanelLogs; searchInput = document.getElementById('bank-beneficiary-search'); logTitle = '银行受益人操作日志'; }
-    else if (currentLogDisplayType === 'makeup') { logsToDisplay = makeupPanelLogs; searchInput = null; logTitle = '补单面板操作日志'; } // 补单面板无搜索框
+    const logsToDisplay = config.getLogs();
+    const searchInput = config.getSearchInput();
+    const logTitle = `${config.name}操作日志`;
 
     const searchFilter = searchInput ? searchInput.value.toLowerCase().trim() : '';
     const keywords = searchFilter ? searchFilter.split(/\s+/).filter(Boolean) : [];
@@ -504,25 +523,19 @@
   }
 
   async function clearLogs(panelType) {
-    let panelName = '';
-    if (panelType === 'transaction') panelName = '交易面板';
-    else if (panelType === 'bankBeneficiary') panelName = '银行受益人面板';
-    else if (panelType === 'makeup') panelName = '补单面板';
-    else return;
+    const config = panelConfigs[panelType];
+    if (!config) return;
 
-    if (!confirm(`确定清空 ${panelName} 的操作日志?`)) {
+    if (!confirm(`确定清空 ${config.name} 的操作日志?`)) {
       await addLogEntry({ message: `<span class="log-info">取消清空日志 (${panelType}).</span>` }, false, panelType);
       return;
     }
 
-    let targetLogs, dbKey;
-    if (panelType === 'transaction') { targetLogs = transactionPanelLogs; dbKey = KEY_PERSISTENT_OPERATION_LOGS_TX; }
-    else if (panelType === 'bankBeneficiary') { targetLogs = bankBeneficiaryPanelLogs; dbKey = KEY_PERSISTENT_OPERATION_LOGS_BB; }
-    else if (panelType === 'makeup') { targetLogs = makeupPanelLogs; dbKey = KEY_PERSISTENT_OPERATION_LOGS_MU; }
+    const targetLogs = config.getLogs();
+    targetLogs.length = 0; // Clear the in-memory array
 
-    targetLogs.length = 0;
     try {
-      await embedTxDb.remove(EMBED_TX_STORE_NAME, dbKey);
+      await embedTxDb.remove(EMBED_TX_STORE_NAME, config.logKey);
       await addLogEntry({ message: `<span class="log-warn">日志已清空 (${panelType}).</span>` }, false, panelType);
     } catch (err) {
       await addLogEntry({ message: `<span class="log-error">清日志(DB)失败 (${panelType}):${escapeHtml(err.message)}.</span>` }, false, panelType);
@@ -532,12 +545,12 @@
   }
 
   function exportLogs(panelType) {
-    let logsToExport, filenamePrefix, searchInput;
+    const config = panelConfigs[panelType];
+    if (!config) return;
 
-    if (panelType === 'transaction') { logsToExport = transactionPanelLogs; filenamePrefix = 'transaction_logs'; searchInput = document.getElementById('embed-tx-search'); }
-    else if (panelType === 'bankBeneficiary') { logsToExport = bankBeneficiaryPanelLogs; filenamePrefix = 'bank_beneficiary_logs'; searchInput = document.getElementById('bank-beneficiary-search'); }
-    else if (panelType === 'makeup') { logsToExport = makeupPanelLogs; filenamePrefix = 'makeup_logs'; searchInput = null; }
-    else return;
+    const logsToExport = config.getLogs();
+    const searchInput = config.getSearchInput();
+    const filenamePrefix = `${panelType}_logs`;
 
     const searchFilter = searchInput ? searchInput.value.toLowerCase().trim() : '';
     const keywords = searchFilter ? searchFilter.split(/\s+/).filter(Boolean) : [];
@@ -772,21 +785,62 @@
         lastSuccessfulDataTimestamp = attemptTime;
         await savePreference(KEY_LAST_REFRESH_TX, lastSuccessfulDataTimestamp.toISOString());
 
-        if (changed || isInitial) {
-          renderTable();
-          if (isInitial) {
+        if (isInitial) {
+            transactionDataCache = newData;
+            renderTable();
             for (const tx of newData) {
-              if (tx.selectedPayoutAccountId && tx.recipientAccNo) {
-                await fetchPayeesForRow(tx.entryId, tx.recipientAccNo);
-              }
+                if (tx.selectedPayoutAccountId && tx.recipientAccNo) {
+                    await fetchPayeesForRow(tx.entryId, tx.recipientAccNo);
+                }
             }
-          }
         } else {
-          document.getElementById('embed-tx-table-container').querySelectorAll('tbody tr').forEach(r => {
-            const id = r.dataset.entryId;
-            const tx = transactionDataCache.find(t => t.entryId === id);
-            if (tx) updateRowState(r, tx);
-          });
+            const oldDataMap = new Map(transactionDataCache.map(tx => [tx.entryId, tx]));
+            const newDataMap = new Map(newData.map(tx => [tx.entryId, tx]));
+            const tableBody = document.querySelector('#embed-tx-table-container tbody');
+
+            // 1. 删除不再存在的行
+            for (const oldTx of transactionDataCache) {
+                if (!newDataMap.has(oldTx.entryId)) {
+                    const rowToRemove = tableBody?.querySelector(`tr[data-entry-id="${escapeHtml(oldTx.entryId)}"]`);
+                    rowToRemove?.remove();
+                }
+            }
+
+            // 2. 更新或添加行
+            const newTransactionDataCache = [];
+            for (const newTx of newData) {
+                const oldTx = oldDataMap.get(newTx.entryId);
+                if (oldTx) {
+                    // 更新现有行
+                    Object.assign(oldTx, newTx); // 将新数据合并到旧对象中以保留状态
+                    const rowToUpdate = tableBody?.querySelector(`tr[data-entry-id="${escapeHtml(oldTx.entryId)}"]`);
+                    if (rowToUpdate) {
+                        // 仅更新变化的单元格
+                        columnConfig.forEach(col => {
+                            const cell = rowToUpdate.querySelector(`td:nth-child(${columnConfig.indexOf(col) + 1})`);
+                            if (cell) {
+                                const newContent = transactionCellRenderer(oldTx, col, columnVisibilityTx).replace(/^<td[^>]*>|<\/td>$/g, '');
+                                if (cell.innerHTML !== newContent) {
+                                   // 避免在输入时重绘，因为这会丢失焦点
+                                   if (!document.activeElement || document.activeElement.closest('tr') !== rowToUpdate || !document.activeElement.matches('[data-type="transfer-amount-input"]')) {
+                                       cell.innerHTML = newContent;
+                                   }
+                                }
+                            }
+                        });
+                        updateRowState(rowToUpdate, oldTx);
+                    }
+                    newTransactionDataCache.push(oldTx);
+                } else {
+                    // 添加新行
+                    const newRow = document.createElement('tr');
+                    newRow.dataset.entryId = escapeHtml(newTx.entryId);
+                    newRow.innerHTML = columnConfig.map(col => transactionCellRenderer(newTx, col, columnVisibilityTx)).join('');
+                    tableBody?.appendChild(newRow);
+                    newTransactionDataCache.push(newTx);
+                }
+            }
+            transactionDataCache = newTransactionDataCache;
         }
       } else {
         if (timeEl) { timeEl.innerText = `刷新失败 (${formatDateTime(attemptTime)}) - ${resp.status}`; timeEl.classList.add('error'); }
@@ -917,22 +971,7 @@
       `</tr>`).join('') + `</tbody></table>`;
 
     tableContainer.innerHTML = tableHTML;
-
-    const table = tableContainer.querySelector('table');
-    if (table) {
-      table.querySelector('thead')?.addEventListener('click', handleHeaderClick);
-      table.addEventListener('contextmenu', handleTableRightClick);
-      // 为动态生成的元素绑定事件
-      table.querySelectorAll('[data-type="payout-account-selector"]').forEach(s=>s.addEventListener('change', handlePayoutAccountChange));
-      table.querySelectorAll('[data-type="payee-selector"]').forEach(s=>s.addEventListener('change', handlePayeeChange));
-      table.querySelectorAll('[data-type="transfer-amount-input"]').forEach(i=>i.addEventListener('input', handleTransferAmountChange));
-      table.querySelectorAll('[data-type="transfer-mode-selector"]').forEach(s=>s.addEventListener('change', handleTransferModeChange));
-      table.querySelectorAll('[data-type="payout-button"]').forEach(b=>b.addEventListener('click', handlePayoutButtonClick));
-      table.querySelectorAll('[data-type="deduct-amount-button"]').forEach(b=>b.addEventListener('click', handleDeductAmountButtonClick));
-      table.querySelectorAll('[data-type="delete-button"]').forEach(b=>b.addEventListener('click', handleDeleteButtonClick));
-      table.querySelectorAll('[data-type="add-beneficiary-account-selector"]').forEach(s=>s.addEventListener('change', handleAddBeneficiaryAccountChange));
-      table.querySelectorAll('[data-type="add-beneficiary-button"]').forEach(b=>b.addEventListener('click', handleAddBeneficiaryButtonClick));
-    }
+    // 事件监听器已通过事件委托在 init() 中统一处理，此处无需再绑定
   }
 
   function handleTableRightClick(event) { const td = event.target.closest('td'); if (td) { event.preventDefault(); const txt = td.innerText.trim(); if (txt) navigator.clipboard.writeText(txt).then(()=>showToast(`已复制: ${txt.substring(0,20)}...`, event)).catch(()=>showToast('复制失败', event)); }}
@@ -1553,11 +1592,7 @@
         `</tr>`).join('') + `</tbody></table>`;
 
     tableContainer.innerHTML = tableHTML;
-    const table = tableContainer.querySelector('table');
-    if (table) {
-        table.querySelector('thead')?.addEventListener('click', handleHeaderClick);
-        table.addEventListener('contextmenu', handleTableRightClick);
-    }
+    // 事件监听器已通过事件委托在 init() 中统一处理，此处无需再绑定
   }
 
   // --- 补单面板函数 ---
@@ -1777,15 +1812,28 @@
 
   // --- 初始化函数 ---
   async function init() {
+    const WEBCFG_URL = 'https://gist.githubusercontent.com/lkm888/b71866f0915cacf88fa2b6e3f7e06b37/raw/webcfg.json';
+    try {
+        const response = await gmFetch('GET', WEBCFG_URL, { "Cache-Control": "no-cache" });
+        const config = JSON.parse(response.responseText);
+        if (config.is_active !== true) {
+            console.log('GDS 交易列表集成版: Script is not active. Halting execution.');
+            return; // Stop execution
+        }
+    } catch (error) {
+        console.error('GDS 交易列表集成版: Failed to fetch or parse web config. Halting execution.', error);
+        return; // Stop execution on error
+    }
+
     // 加载日志
     try {
-        transactionPanelLogs = (await loadPreference(KEY_PERSISTENT_OPERATION_LOGS_TX, []));
-        bankBeneficiaryPanelLogs = (await loadPreference(KEY_PERSISTENT_OPERATION_LOGS_BB, []));
-        makeupPanelLogs = (await loadPreference(KEY_PERSISTENT_OPERATION_LOGS_MU, []));
+        panelConfigs.transaction.setLogs(await loadPreference(panelConfigs.transaction.logKey, []));
+        panelConfigs.bankBeneficiary.setLogs(await loadPreference(panelConfigs.bankBeneficiary.logKey, []));
+        panelConfigs.makeup.setLogs(await loadPreference(panelConfigs.makeup.logKey, []));
     } catch(e) {
         console.error("加载持久日志失败:", e);
-        transactionPanelLogs = []; bankBeneficiaryPanelLogs = []; makeupPanelLogs = [];
-        transactionPanelLogs.unshift({ time: formatDateTime(), message: `<span class="log-error">加载持久日志失败: ${escapeHtml(e.message)}.</span>`});
+        Object.values(panelConfigs).forEach(config => config.setLogs([]));
+        addLogEntry({ message: `<span class="log-error">加载持久日志失败: ${escapeHtml(e.message)}.</span>`}, false, 'transaction');
     }
 
     const gm = (typeof GM === 'object' && GM?.info) ? GM.info : { script: { name: 'GDS交易列表', version: 'N/A' } };
@@ -1881,7 +1929,7 @@
             await Promise.all(keysToClear.map(k => embedTxDb.remove(EMBED_TX_STORE_NAME, k)));
 
             // 重置内存中的状态
-            transactionPanelLogs = []; bankBeneficiaryPanelLogs = []; makeupPanelLogs = [];
+            Object.values(panelConfigs).forEach(config => config.setLogs([]));
             currentTheme = 'light';
             sortConfigTx = { key: null, direction: 'asc' };
             bankBeneficiarySortConfig = { key: null, direction: 'asc' };
@@ -1921,6 +1969,60 @@
     document.getElementById('show-transaction-panel-btn').addEventListener('click', () => showSubPanel('transaction'));
     document.getElementById('show-bank-beneficiary-panel-btn').addEventListener('click', () => showSubPanel('bankBeneficiary'));
     document.getElementById('show-makeup-panel-btn').addEventListener('click', () => showSubPanel('makeup'));
+
+    // ---- 事件委托 (Event Delegation) ----
+    embedTxPanel.addEventListener('click', (event) => {
+        const target = event.target;
+        const button = target.closest('button');
+        const th = target.closest('th');
+
+        if (button) {
+            const dataType = button.dataset.type;
+            if (dataType) {
+                switch (dataType) {
+                    case 'payout-button': handlePayoutButtonClick(event); break;
+                    case 'deduct-amount-button': handleDeductAmountButtonClick(event); break;
+                    case 'delete-button': handleDeleteButtonClick(event); break;
+                    case 'add-beneficiary-button': handleAddBeneficiaryButtonClick(event); break;
+                }
+            }
+        }
+        if (th) {
+            handleHeaderClick(event);
+        }
+    });
+
+    embedTxPanel.addEventListener('change', (event) => {
+        const target = event.target;
+        const selector = target.closest('select');
+        if (selector) {
+            const dataType = selector.dataset.type;
+            if (dataType) {
+                switch (dataType) {
+                    case 'payout-account-selector': handlePayoutAccountChange(event); break;
+                    case 'payee-selector': handlePayeeChange(event); break;
+                    case 'transfer-mode-selector': handleTransferModeChange(event); break;
+                    case 'add-beneficiary-account-selector': handleAddBeneficiaryAccountChange(event); break;
+                }
+            }
+        }
+    });
+
+    embedTxPanel.addEventListener('input', (event) => {
+        const target = event.target;
+        const input = target.closest('input');
+        if (input && input.dataset.type === 'transfer-amount-input') {
+            handleTransferAmountChange(event);
+        }
+    });
+
+    embedTxPanel.addEventListener('contextmenu', (event) => {
+        const td = event.target.closest('td');
+        if (td) {
+            handleTableRightClick(event);
+        }
+    });
+
 
     await addLogEntry({ message: `<span class="log-info">初始化完成.</span>` }, false, 'transaction');
   }
