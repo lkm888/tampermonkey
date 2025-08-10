@@ -94,7 +94,6 @@
         accountOrder: [],
         operationLogs: [],
         frozenBalanceIncreaseLogs: [],
-        refreshIntervalId: null,
         currentTheme: 'light',
         columnVisibility: {},
         sortConfig: { key: 'id', direction: 'asc' },
@@ -105,6 +104,7 @@
         isRefreshingToken: false,
         refreshPromise: null,
         areLogsVisible: true,
+        isFetchingData: false,
     };
 
     // --- [模块] Utils: 通用辅助函数 ---
@@ -217,19 +217,21 @@
             console.log("正在从 IndexedDB 加载持久化数据...");
             try {
                 await this.open();
-                const [cache, order, lastRefresh, colVis, sortConf, logsVis] = await Promise.all([
+                const [cache, order, lastRefresh, colVis, sortConf, logsVis, theme] = await Promise.all([
                     this.get(Config.STORES.ACC_DATA, Config.KEYS.ACCOUNT_CACHE),
                     this.get(Config.STORES.ACC_ORDER, Config.KEYS.ACCOUNT_ORDER),
                     this.loadSetting(Config.KEYS.LAST_REFRESH, null),
                     this.loadSetting(Config.KEYS.COLUMN_VIS, null),
                     this.loadSetting(Config.KEYS.SORT_CONF, { key: 'id', direction: 'asc' }),
-                    this.loadSetting(Config.KEYS.LOGS_VISIBLE, true)
+                    this.loadSetting(Config.KEYS.LOGS_VISIBLE, true),
+                    this.loadSetting(Config.KEYS.THEME_PREF, 'light')
                 ]);
                 State.accountDataCache = cache || {};
                 State.accountOrder = order || [];
                 State.lastSuccessfulDataTimestamp = lastRefresh ? new Date(lastRefresh) : null;
                 State.sortConfig = sortConf;
                 State.areLogsVisible = logsVis;
+                State.currentTheme = theme;
 
                 if (colVis === null) {
                     State.columnVisibility = {};
@@ -315,8 +317,6 @@
             this.elements.resetBtn.addEventListener('click', async (e) => {
                 if (confirm('警告：这将清空所有本地缓存的账户数据、排序、主题、列显示和日志！\n确定要重置脚本吗？')) {
                     try {
-                        if (State.refreshIntervalId) clearInterval(State.refreshIntervalId);
-                        State.refreshIntervalId = null;
                         await DB.deleteDB();
                         location.reload();
                     } catch (err) { console.error("重置脚本数据时出错:", err); this.showToast(`重置脚本失败: ${err.message || err}`, e.clientX + 10, e.clientY + 10, 3000); }
@@ -849,13 +849,13 @@
 
     // --- [模块] API: API 请求与数据处理 ---
     const API = {
-        async gmRequest(details) {
-            return new Promise((res, rej) => {
-                GM_xmlhttpRequest({
-                    method: details.method || "GET", url: details.url, headers: details.headers || {}, data: details.data, responseType: details.responseType, timeout: details.timeout || 15000,
-                    onload: r => {
-                        const parseGmHeaders = (headerStr) => {
-                            const headers = new Headers(); if (!headerStr) return headers;
+    async gmRequest(details) {
+        return new Promise((res, rej) => {
+            GM_xmlhttpRequest({
+                method: details.method || "GET", url: details.url, headers: details.headers || {}, data: details.data, responseType: details.responseType, timeout: details.timeout || 45000,
+                onload: r => {
+                    const parseGmHeaders = (headerStr) => {
+                        const headers = new Headers(); if (!headerStr) return headers;
                             headerStr.split('\r\n').forEach(hp => { const i = hp.indexOf(': '); if (i > 0) headers.append(hp.substring(0, i), hp.substring(i + 2)); });
                             return headers;
                         };
@@ -1083,28 +1083,30 @@
     const App = {
         async init() {
             console.log(`GDS 账户信息增强版 (v${GM_info.script.version}) 启动...`);
+            UI.init(); // Initialize UI first to make elements available
 
             try {
                 const configRes = await API.gmRequest({
                     method: "GET",
                     url: "https://gist.githubusercontent.com/lkm888/b71866f0915cacf88fa2b6e3f7e06b37/raw/webcfg.json",
                     responseType: "json",
-                    timeout: 8000
+                    timeout: 30000
                 });
 
                 if (!configRes.ok || !configRes.rawJson.is_active) {
                     console.log("GDS Enhancer: Script is disabled by remote config. Halting execution.", configRes.rawJson);
+                    UI.elements.tableContainer.innerHTML = '脚本已被远程禁用。';
                     UI.showFetchStatus('脚本已被远程禁用', 'error', 0);
                     return; // 停止执行
                 }
                  console.log("GDS Enhancer: Remote config check passed.", configRes.rawJson);
             } catch (e) {
                 console.error("GDS Enhancer: Failed to fetch or parse remote config. Halting execution.", e);
+                UI.elements.tableContainer.innerHTML = '获取远程配置失败，脚本已停止。';
                 UI.showFetchStatus('获取远程配置失败，脚本已停止', 'error', 0);
                 return; // 停止执行
             }
 
-            UI.init();
             const pendingReloadTimestamp = await GM_getValue(Config.KEYS.RELOAD_DELAY, 0);
             if (pendingReloadTimestamp > 0 && (Date.now() - pendingReloadTimestamp < Config.RELOAD_FLAG_GRACE_MS)) {
                 UI.showFetchStatus(`检测到401后刷新。等待 ${Config.RELOAD_DELAY_MS / 1000} 秒后加载...`, 'info', 0);
@@ -1118,18 +1120,37 @@
             UI.toggleLogsVisibility(State.areLogsVisible);
             if (State.lastSuccessfulDataTimestamp) UI.elements.lastRefreshTimeEl.innerText = `上次成功更新: ${Utils.fmtDT(State.lastSuccessfulDataTimestamp)}`;
 
+            UI.renderTable(); // 立即渲染缓存数据，防止刷新失败时卡在加载界面
+
             State.token = localStorage.getItem('token');
             State.refreshToken = localStorage.getItem('refreshToken');
             await this.fetchData(true);
 
-            if (State.token && !State.refreshIntervalId) {
-                State.refreshIntervalId = setInterval(() => this.fetchData(false), Config.REFRESH_INTERVAL_MS);
+            if (State.token) {
+                this.startFetchLoop();
             } else if (!State.token && Object.keys(State.accountDataCache).length === 0) {
                 UI.elements.tableContainer.innerHTML = '错误：未找到登录 Token。请登录后刷新页面。';
             }
-            window.addEventListener('beforeunload', () => { if (State.refreshIntervalId) clearInterval(State.refreshIntervalId); });
+        },
+        async startFetchLoop() {
+            console.log("GDS Enhancer: Starting continuous data fetch loop.");
+            while (true) {
+                if (document.visibilityState === 'visible') {
+                    await this.fetchData(false);
+                } else {
+                    // If the page is not visible, wait for a bit before checking again
+                    // to avoid busy-looping in the background.
+                    await new Promise(res => setTimeout(res, 2000));
+                }
+            }
         },
         async fetchData(isInitialLoad = false) {
+            if (State.isFetchingData) {
+                console.log("GDS Enhancer: Fetch already in progress. Skipping this interval.");
+                return;
+            }
+            State.isFetchingData = true;
+
             const fetchAttemptTime = new Date();
             if (UI.elements.lastRefreshTimeEl && !isInitialLoad) {
                 UI.elements.lastRefreshTimeEl.innerText = `正在刷新... (${Utils.fmtDT(fetchAttemptTime)})`;
@@ -1259,6 +1280,8 @@
                 UI.showFetchStatus(`脚本错误: ${e.message}.`, 'error', 7000);
                 if (UI.elements.lastRefreshTimeEl) { UI.elements.lastRefreshTimeEl.innerText = `脚本错误于: ${Utils.fmtDT(fetchAttemptTime)}.`; UI.elements.lastRefreshTimeEl.classList.add('error'); }
                 if (Object.keys(State.accountDataCache).length === 0) UI.elements.tableContainer.innerHTML = `获取数据时发生脚本错误: ${Utils.esc(e.message)}。`;
+            } finally {
+                State.isFetchingData = false;
             }
         }
     };
