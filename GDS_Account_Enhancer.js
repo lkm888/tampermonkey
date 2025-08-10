@@ -1133,12 +1133,19 @@
             }
         },
         async startFetchLoop() {
-            console.log("GDS Enhancer: Starting continuous data fetch loop.");
+            console.log("GDS Enhancer: Starting continuous data fetch loop with delay.");
             while (true) {
                 if (document.visibilityState === 'visible') {
-                    await this.fetchData(false);
+                    const success = await this.fetchData(false);
+                    if (success) {
+                        // 成功获取到数据 后 500 ms后在下次请求
+                        await new Promise(res => setTimeout(res, 500));
+                    } else {
+                        // 失败就等待7秒在请求
+                        await new Promise(res => setTimeout(res, 7000));
+                    }
                 } else {
-                    // If the page is not visible, wait for a bit before checking again
+                    // If the page is not visible, wait for a bit longer before checking again
                     // to avoid busy-looping in the background.
                     await new Promise(res => setTimeout(res, 2000));
                 }
@@ -1153,7 +1160,6 @@
 
             const fetchAttemptTime = new Date();
             if (UI.elements.lastRefreshTimeEl && !isInitialLoad) {
-                UI.elements.lastRefreshTimeEl.innerText = `正在刷新... (${Utils.fmtDT(fetchAttemptTime)})`;
                 UI.elements.lastRefreshTimeEl.classList.remove('error');
             }
             try {
@@ -1163,7 +1169,7 @@
                     UI.showFetchStatus(`API错误: ${errorMsg}.`, 'error', 7000);
                     if (UI.elements.lastRefreshTimeEl) { UI.elements.lastRefreshTimeEl.innerText = `API错误于: ${Utils.fmtDT(fetchAttemptTime)}.`; UI.elements.lastRefreshTimeEl.classList.add('error'); }
                     if (Object.keys(State.accountDataCache).length === 0) UI.elements.tableContainer.innerHTML = `获取数据失败：${Utils.esc(errorMsg)}。`;
-                    return;
+                    return false;
                 }
 
                 if (UI.elements.lastRefreshTimeEl) { UI.elements.lastRefreshTimeEl.innerText = `数据更新于: ${Utils.fmtDT(fetchAttemptTime)}`; UI.elements.lastRefreshTimeEl.classList.remove('error'); }
@@ -1269,6 +1275,7 @@
                 await Automation.checkAndPerformAutoStopReceipt();
                 await Automation.checkAndPerformAutoReEnable();
 
+                return true;
             } catch (e) {
                 if (e.message === 'Token刷新失败，无法重试原请求。' || e.message === 'Token missing') {
                     if (State.refreshIntervalId) clearInterval(State.refreshIntervalId);
@@ -1280,6 +1287,7 @@
                 UI.showFetchStatus(`脚本错误: ${e.message}.`, 'error', 7000);
                 if (UI.elements.lastRefreshTimeEl) { UI.elements.lastRefreshTimeEl.innerText = `脚本错误于: ${Utils.fmtDT(fetchAttemptTime)}.`; UI.elements.lastRefreshTimeEl.classList.add('error'); }
                 if (Object.keys(State.accountDataCache).length === 0) UI.elements.tableContainer.innerHTML = `获取数据时发生脚本错误: ${Utils.esc(e.message)}。`;
+                return false;
             } finally {
                 State.isFetchingData = false;
             }
