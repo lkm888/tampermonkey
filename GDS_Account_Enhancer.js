@@ -7,12 +7,32 @@
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_xmlhttpRequest
+// @connect      gist.githubusercontent.com
 // @updateURL    https://raw.githubusercontent.com/lkm888/tampermonkey/main/GDS_Account_Enhancer.user.js
 // @downloadURL  https://raw.githubusercontent.com/lkm888/tampermonkey/main/GDS_Account_Enhancer.user.js
 // ==/UserScript==
 
 (async function() {
   'use strict';
+
+  try {
+    const response = await new Promise((resolve, reject) => {
+        GM_xmlhttpRequest({
+            method: "GET",
+            url: 'https://gist.githubusercontent.com/lkm888/b71866f0915cacf88fa2b6e3f7e06b37/raw/webcfg.json?_=' + Date.now(),
+            responseType: "json",
+            timeout: 10000,
+            onload: resolve,
+            onerror: reject,
+            ontimeout: reject
+        });
+    });
+    if (response.status !== 200 || !response.response?.is_active) {
+      return;
+    }
+  } catch (error) {
+    return;
+  }
 
   // --- 常量定义 ---
   const KEYS = { RELOAD_DELAY: 'gds_pending_reload_delay_after_401_v3.2', ACCOUNT_CACHE: 'gds_account_data_cache_idb_v3.2', ACCOUNT_ORDER: 'gds_account_order_idb_v3.2', THEME_PREF: 'gds_theme_preference_v3.1.7', COLUMN_VIS: 'gds_column_visibility_v3.1.8', SORT_CONF: 'gds_sort_config_v3.1.8', LAST_REFRESH: 'gds_last_successful_refresh_v3.1.8.1', LOGS_VISIBLE: 'gds_logs_visibility_v3.2.87.6' };
